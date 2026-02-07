@@ -1,0 +1,18 @@
+[submodule "lib/ExVectrArduinoPlatform"]
+	path = lib/ExVectrArduinoPlatform
+	url = https://github.com/ExVeCtr/ExVectrArduinoPlatform.git
+[submodule "lib/ExVectrCore"]
+	path = lib/ExVectrCore
+	url = https://github.com/ExVeCtr/ExVectrCore.git
+[submodule "lib/ExVectrHAL"]
+	path = lib/ExVectrHAL
+	url = https://github.com/ExVeCtr/ExVectrHAL.git
+[submodule "lib/ExVectrData"]
+	path = lib/ExVectrData
+	url = https://github.com/ExVeCtr/ExVectrData.git
+[submodule "lib/ExVectrNetwork"]
+	path = lib/ExVectrNetwork
+	url = https://github.com/ExVeCtr/ExVectrNetwork.git
+[submodule "lib/ExVectrPackets"]
+	path = lib/ExVectrPackets
+	url = https://github.com/ExVeCtr/ExVectrPackets.git
