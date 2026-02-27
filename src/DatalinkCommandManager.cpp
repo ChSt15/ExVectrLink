@@ -50,6 +50,12 @@ void initCommandManager(
         getDatalinkRadioB().setBandwidth(modParams.bandwidth);
       });
 
+  serialTelecoms.addSerialPacketHandler<SerialPacket_SetTxPower>(
+      [&serialTelecoms](const SerialPacket_SetTxPower &packet) {
+        getDatalinkRadioA().setTxPower(packet.txPower);
+        getDatalinkRadioB().setTxPower(packet.txPower);
+      });
+
   // Sending info
   getFhss().addReceiveHandler(
       [&serialTelecoms](const VCTR::network::DataPacket &packet) {

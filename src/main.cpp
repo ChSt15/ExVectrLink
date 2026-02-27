@@ -67,6 +67,11 @@ void setup() {
 
   WifiUpload::initWifiUpload(serialTelecoms);
 
+  ExVectrLink::datalink::getDatalinkRadioA().setPAdbm(
+      HardwareConfig::sx1280APAdbm);
+  ExVectrLink::datalink::getDatalinkRadioB().setPAdbm(
+      HardwareConfig::sx1280BPAdbm);
+
   // Core::getSystemScheduler().removeTask(serialTelecoms);
 }
 
