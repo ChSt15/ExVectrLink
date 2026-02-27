@@ -15,6 +15,8 @@
 #include "Hardware.hpp"
 #include "WifiUpload.hpp"
 
+#include "ExVectrLink/SerialTelecomPackets.hpp"
+
 #include "ExVectrLink/SerialTelecoms.hpp"
 
 namespace VCTR::WifiUpload {
@@ -119,11 +121,11 @@ void initWifiUpload(SerialTelecoms::ExVectrLinkSerialTelecoms &serialTelecoms) {
 
   serialTelecomsPtr = &serialTelecoms;
   serialTelecomsPtr->addSerialPacketHandler(
-      SerialTelecoms::SerialPacketType::UpdateMode,
+      VCTR::SerialTelecoms::packets::UpdateMode,
       [](const Core::ListArray<uint8_t> &data) {
         wifiTimeSync.setPaused(false);
         serialTelecomsPtr->sendSerialPacket(
-            SerialTelecoms::SerialPacketType::UpdateMode, 0);
+            VCTR::SerialTelecoms::packets::UpdateMode, 0);
       });
 }
 

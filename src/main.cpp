@@ -16,6 +16,7 @@
 #include "DatalinkSetup.hpp"
 
 using namespace VCTR;
+using namespace VCTR::SerialTelecoms;
 
 Platform::BusUART serialBus(Serial);
 SerialTelecoms::ExVectrLinkSerialTelecoms serialTelecoms(serialBus);
@@ -31,7 +32,7 @@ public:
   void taskThread() override {
     int8_t temp = temperatureRead();
     serialTelecoms.sendSerialPacket(
-        SerialTelecoms::SerialPacketType::DeviceTemperature, &temp, 1);
+        packets::SerialPacket_DeviceTemperature{temp});
   }
 };
 TempMonitor tempMonitor;

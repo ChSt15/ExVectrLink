@@ -3,23 +3,26 @@
 #include "ExVectrCore/print.hpp"
 
 #include "ExVectrLink/SerialTelecomPackets.hpp"
+#include "ExVectrLink/datalink/LinkSettings.hpp"
 
+#include "DatalinkSetup.hpp"
 #include "DiversitySetup.hpp"
+#include "FhssSetup.hpp"
 
 #include "DatalinkCommandManager.hpp"
 
 namespace VCTR::ExVectrLink::datalink {
 
-using namespace VCTR::network::datalink;
+using namespace VCTR::SerialTelecoms::packets;
 
 VCTR::network::DataPacket dataSendBuffer;
 
 void initCommandManager(
     SerialTelecoms::ExVectrLinkSerialTelecoms &serialTelecoms) {
 
-  // Sending Data Command
+  // Receiving commands
   serialTelecoms.addSerialPacketHandler(
-      SerialTelecoms::SerialPacketType::PacketData,
+      SerialPacketType::PacketData,
       [&serialTelecoms](const Core::ListArray<uint8_t> &data) {
         for (size_t i = 0; i < data.size(); i++) {
           dataSendBuffer.payload.append(data[i]);
@@ -27,13 +30,7 @@ void initCommandManager(
       });
 
   serialTelecoms.addSerialPacketHandler(
-      SerialTelecoms::SerialPacketType::PacketDataClear,
-      [&serialTelecoms](const Core::ListArray<uint8_t> &data) {
-        dataSendBuffer.payload.clear();
-      });
-
-  serialTelecoms.addSerialPacketHandler(
-      SerialTelecoms::SerialPacketType::DataSend,
+      SerialPacketType::DataSend,
       [&serialTelecoms](const Core::ListArray<uint8_t> &data) {
         if (dataSendBuffer.payload.size() > 0) {
           getSx1280Diversity().transmitDataframe(dataSendBuffer);
@@ -41,23 +38,23 @@ void initCommandManager(
         }
       });
 
-  // Send Link Info response
-  serialTelecoms.addSerialPacketHandler(
-      SerialTelecoms::SerialPacketType::LinkInfo,
-      [&serialTelecoms](const Core::ListArray<uint8_t> &data) {
-        SerialTelecoms::packets::SerialPacket_LinkInfo linkInfo;
-        auto bestLinkIndex = getSx1280Diversity().getCurrentBestLinkIndex();
-        auto bestLink = *getSx1280Diversity().getDiversityLink(bestLinkIndex);
-        linkInfo.antenna = bestLinkIndex;
-        linkInfo.rssi = bestLink.lastPacketRSSI();
-        linkInfo.snr = bestLink.lastPacketSNR();
-        linkInfo.linkQuality = (linkInfo.rssi + 120) * 2;
-        linkInfo.dualLinkMode = false;
-        linkInfo.linkSpeed = 0;
-        Core::ListArray<uint8_t> serializedLinkInfo;
-        linkInfo.serialize(serializedLinkInfo.getPtr());
-        serialTelecoms.sendSerialPacket(
-            SerialTelecoms::SerialPacketType::LinkInfo, serializedLinkInfo);
+  serialTelecoms.addSerialPacketHandler<SerialPacket_SetModulationPreset>(
+      [&serialTelecoms](const SerialPacket_SetModulationPreset &packet) {
+        const auto &modParams = modulationPresets[packet.presetIndex];
+        getDatalinkRadioA().setCodingRate(modParams.codingRate);
+        getDatalinkRadioA().setSpreadingFactor(modParams.spreadingFactor);
+        getDatalinkRadioA().setBandwidth(modParams.bandwidth);
+
+        getDatalinkRadioB().setCodingRate(modParams.codingRate);
+        getDatalinkRadioB().setSpreadingFactor(modParams.spreadingFactor);
+        getDatalinkRadioB().setBandwidth(modParams.bandwidth);
+      });
+
+  // Sending info
+  getFhss().addReceiveHandler(
+      [&serialTelecoms](const VCTR::network::DataPacket &packet) {
+        serialTelecoms.sendSerialPacket(SerialPacketType::PacketData,
+                                        packet.payload);
       });
 }
 
