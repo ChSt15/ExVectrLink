@@ -16,3 +16,6 @@
 [submodule "lib/ExVectrPackets"]
 	path = lib/ExVectrPackets
 	url = https://github.com/ExVeCtr/ExVectrPackets.git
+[submodule "lib/ExVectrLink"]
+	path = lib/ExVectrLink
+	url = https://github.com/ExVeCtr/ExVectrLink.git
