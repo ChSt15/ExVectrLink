@@ -2,8 +2,8 @@
 
 #include "ExVectrCore/print.hpp"
 
-#include "ExVectrLink/SerialTelecomPackets.hpp"
 #include "ExVectrLink/datalink/LinkSettings.hpp"
+#include "ExVectrLink/serial/SerialTelecomPackets.hpp"
 
 #include "DatalinkSetup.hpp"
 #include "DiversitySetup.hpp"
@@ -13,28 +13,15 @@
 
 namespace VCTR::ExVectrLink::datalink {
 
-using namespace VCTR::SerialTelecoms::packets;
+using namespace VCTR::ExVectrLink::packets;
 
-VCTR::network::DataPacket dataSendBuffer;
+void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
 
-void initCommandManager(
-    SerialTelecoms::ExVectrLinkSerialTelecoms &serialTelecoms) {
-
-  // Receiving commands
   serialTelecoms.addSerialPacketHandler(
       SerialPacketType::PacketData,
       [&serialTelecoms](const Core::ListArray<uint8_t> &data) {
-        for (size_t i = 0; i < data.size(); i++) {
-          dataSendBuffer.payload.append(data[i]);
-        }
-      });
-
-  serialTelecoms.addSerialPacketHandler(
-      SerialPacketType::DataSend,
-      [&serialTelecoms](const Core::ListArray<uint8_t> &data) {
-        if (dataSendBuffer.payload.size() > 0) {
-          getSx1280Diversity().transmitDataframe(dataSendBuffer);
-          dataSendBuffer.payload.clear();
+        if (data.size() > 0) {
+          getFhss().transmitDataframe(data);
         }
       });
 
@@ -54,6 +41,18 @@ void initCommandManager(
       [&serialTelecoms](const SerialPacket_SetTxPower &packet) {
         getDatalinkRadioA().setTxPower(packet.txPower);
         getDatalinkRadioB().setTxPower(packet.txPower);
+      });
+
+  serialTelecoms.addSerialPacketHandler<SerialPacket_SetLinkChannel>(
+      [&serialTelecoms](const SerialPacket_SetLinkChannel &packet) {
+        getFhss().enableFhss(false);
+        getSx1280Diversity().setChannel(packet.channelIndex);
+      });
+
+  serialTelecoms.addSerialPacketHandler<SerialPacket_SetEnableFhss>(
+      [&serialTelecoms](const SerialPacket_SetEnableFhss &packet) {
+        getFhss().enableFhss(packet.enable);
+        getFhss().setFhssKey(packet.seqKey);
       });
 
   // Sending info

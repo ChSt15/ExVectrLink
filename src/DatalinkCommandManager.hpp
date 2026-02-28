@@ -3,12 +3,12 @@
 
 #include "ExVectrNetwork/datalink/sx1280/Sx1280.hpp"
 
-#include "ExVectrLink/SerialTelecoms.hpp"
+#include "ExVectrLink/serial/SerialTelecoms.hpp"
 
 namespace VCTR::ExVectrLink::datalink {
 
 extern void
-initCommandManager(SerialTelecoms::ExVectrLinkSerialTelecoms &serialTelecoms);
+initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms);
 
 } // namespace VCTR::ExVectrLink::datalink
 #endif // EXVECRLINK_DATALINKCOMMANDMANAGER_HPP

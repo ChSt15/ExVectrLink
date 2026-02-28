@@ -17,6 +17,8 @@ VCTR::network::datalink::SX128XLT &getRadioDriverB();
 
 void initRadioDrivers();
 
+void checkBusy();
+
 } // namespace VCTR::ExVectrLink::radio
 
 #endif // EXVECTRLINK_SX1280_HPP

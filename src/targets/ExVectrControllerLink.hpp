@@ -5,30 +5,34 @@ namespace VCTR::HardwareConfig {
 
 constexpr int button = 0; // GPIO pin for the button
 
-constexpr int spiMiso = 33;
-constexpr int spiMosi = 32;
-constexpr int spiSck = 25;
+constexpr int spiMiso = 12;
+constexpr int spiMosi = 11;
+constexpr int spiSck = 9;
 
-constexpr int sx1280ABusy = 36;
-constexpr int sx1280ADio1 = 37;
-constexpr int sx1280ANss = 27;
-constexpr int sx1280ARst = 26;
-constexpr int sx1280ARxEn = 10;
-constexpr int sx1280ATxEn = 14;
-constexpr int sx1280APAdbm = 20;
+// Radio A is Horizontal antenna
+constexpr int sx1280ABusy = 8;
+constexpr int sx1280ADio1 = 14;
+constexpr int sx1280ANss = 13;
+constexpr int sx1280ARst = 10;
+constexpr int sx1280ARxEn = 7;
+constexpr int sx1280ATxEn = 6;
+constexpr int sx1280APAdbm = 27;
+constexpr int sx1280AMaxPower = 27;
 
-constexpr int sx1280BBusy = 39;
-constexpr int sx1280BDio1 = 34;
-constexpr int sx1280BNss = 13;
-constexpr int sx1280BRst = 21;
-constexpr int sx1280BRxEn = 9;
-constexpr int sx1280BTxEn = 15;
-constexpr int sx1280BPAdbm = 20;
+// Radio B is Vertical antenna
+constexpr int sx1280BBusy = 21;
+constexpr int sx1280BDio1 = 5;
+constexpr int sx1280BNss = 4;
+constexpr int sx1280BRst = 17;
+constexpr int sx1280BRxEn = 3;
+constexpr int sx1280BTxEn = 2;
+constexpr int sx1280BPAdbm = 27;
+constexpr int sx1280BMaxPower = 27;
 
-constexpr int ledRgb = 22;
+constexpr int ledRgb = -1; // Not used, set to -1
 
-constexpr int serialRx = 3;
-constexpr int serialTx = 1;
+constexpr int serialRx = 18;
+constexpr int serialTx = 16;
 
 } // namespace VCTR::HardwareConfig
 

@@ -20,11 +20,11 @@ using namespace VCTR::ExVectrLink::radio;
 using namespace VCTR::network::datalink;
 
 VCTR::network::datalink::Datalink_SX1280 &getDatalinkRadioA() {
-  static Datalink_SX1280 datalinkRadioA(getRadioDriverA(), "RadioA");
+  static Datalink_SX1280 datalinkRadioA(getRadioDriverA());
   return datalinkRadioA;
 }
 VCTR::network::datalink::Datalink_SX1280 &getDatalinkRadioB() {
-  static Datalink_SX1280 datalinkRadioB(getRadioDriverB(), "RadioB");
+  static Datalink_SX1280 datalinkRadioB(getRadioDriverB());
   return datalinkRadioB;
 }
 

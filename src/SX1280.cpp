@@ -47,6 +47,12 @@ SX128XLT &getRadioDriverB() {
   return sx1280BDriver;
 }
 
+void checkBusy() {
+  LOG_MSG("Checking busy: A_BUSY=%d B_BUSY=%d\n",
+          static_cast<int>(sx1280ABusy.getPinValue()),
+          static_cast<int>(sx1280BBusy.getPinValue()));
+}
+
 void initRadioDrivers() {
 
   sx1280ANss.init(HAL::GPIO_IOMODE_t::IOMODE_OUTPUT);
@@ -87,9 +93,7 @@ void initRadioDrivers() {
   // Core::delay(50 * Core::MILLISECONDS);
 
   // Empirically stable order on this hardware family.
-  LOG_MSG("Pre-B begin: A_BUSY=%d B_BUSY=%d\n",
-          static_cast<int>(sx1280ABusy.getPinValue()),
-          static_cast<int>(sx1280BBusy.getPinValue()));
+  checkBusy();
 
   int64_t startTime = Core::NOW();
   int64_t lastCheckTime = startTime;

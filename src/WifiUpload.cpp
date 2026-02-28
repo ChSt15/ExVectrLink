@@ -15,16 +15,17 @@
 #include "Hardware.hpp"
 #include "WifiUpload.hpp"
 
-#include "ExVectrLink/SerialTelecomPackets.hpp"
-
-#include "ExVectrLink/SerialTelecoms.hpp"
+#include "ExVectrLink/serial/SerialTelecomPackets.hpp"
+#include "ExVectrLink/serial/SerialTelecoms.hpp"
 
 namespace VCTR::WifiUpload {
+
+using namespace VCTR::ExVectrLink;
 
 const char *ssid = "WIFICC";
 const char *password = "R8765432109R";
 
-SerialTelecoms::ExVectrLinkSerialTelecoms *serialTelecomsPtr = nullptr;
+SerialTelecoms *serialTelecomsPtr = nullptr;
 
 class WiFiTimeSync : public Core::Task_Periodic {
 private:
@@ -115,17 +116,15 @@ void startButtonWifiUploadMode() {
   Core::getSystemScheduler().addTask(wifiTimeSync);
 }
 
-void initWifiUpload(SerialTelecoms::ExVectrLinkSerialTelecoms &serialTelecoms) {
+void initWifiUpload(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
 
   pinMode(HardwareConfig::button, INPUT_PULLUP);
 
   serialTelecomsPtr = &serialTelecoms;
   serialTelecomsPtr->addSerialPacketHandler(
-      VCTR::SerialTelecoms::packets::UpdateMode,
-      [](const Core::ListArray<uint8_t> &data) {
+      packets::UpdateMode, [](const Core::ListArray<uint8_t> &data) {
         wifiTimeSync.setPaused(false);
-        serialTelecomsPtr->sendSerialPacket(
-            VCTR::SerialTelecoms::packets::UpdateMode, 0);
+        serialTelecomsPtr->sendSerialPacket(packets::UpdateMode, 0);
       });
 }
 

@@ -5,7 +5,7 @@
 #include "ExVectrCore.hpp"
 #include "ExVectrCore/scheduler2.hpp"
 
-#include "ExVectrLink/SerialTelecoms.hpp"
+#include "ExVectrLink/serial/SerialTelecoms.hpp"
 
 #include "Hardware.hpp"
 
@@ -16,10 +16,11 @@
 #include "DatalinkSetup.hpp"
 
 using namespace VCTR;
-using namespace VCTR::SerialTelecoms;
+using namespace VCTR::ExVectrLink;
 
-Platform::BusUART serialBus(Serial);
-SerialTelecoms::ExVectrLinkSerialTelecoms serialTelecoms(serialBus);
+HardwareSerial linkSerialPort(0);
+Platform::BusUART serialBus(linkSerialPort);
+SerialTelecoms serialTelecoms(serialBus);
 
 class TempMonitor : public Core::Task_Periodic {
 public:
@@ -42,6 +43,8 @@ void setup() {
   pinMode(HardwareConfig::button, INPUT_PULLUP);
 
   Serial.begin(115200);
+  linkSerialPort.begin(115200, SERIAL_8N1, HardwareConfig::serialRx,
+                       HardwareConfig::serialTx);
 
   setCpuFrequencyMhz(80);
 
@@ -71,6 +74,10 @@ void setup() {
       HardwareConfig::sx1280APAdbm);
   ExVectrLink::datalink::getDatalinkRadioB().setPAdbm(
       HardwareConfig::sx1280BPAdbm);
+  ExVectrLink::datalink::getDatalinkRadioA().setTxMaxPower(
+      HardwareConfig::sx1280AMaxPower);
+  ExVectrLink::datalink::getDatalinkRadioB().setTxMaxPower(
+      HardwareConfig::sx1280BMaxPower);
 
   // Core::getSystemScheduler().removeTask(serialTelecoms);
 }
