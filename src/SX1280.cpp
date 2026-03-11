@@ -33,6 +33,8 @@ Platform::PinGPIO sx1280BTxEn(HardwareConfig::sx1280BTxEn);
 Platform::BusSPIDevice sx1280ASpiBus(SPI, sx1280ANss, true);
 Platform::BusSPIDevice sx1280BSpiBus(SPI, sx1280BNss, true);
 
+bool radiosInitialized = false;
+
 SX128XLT &getRadioDriverA() {
   static SX128XLT sx1280ADriver(sx1280ASpiBus, DEVICE_SX1281, sx1280ANss,
                                 sx1280ARst, sx1280ABusy, sx1280ADio1,
@@ -46,6 +48,8 @@ SX128XLT &getRadioDriverB() {
                                 sx1280BRxEn, sx1280BTxEn);
   return sx1280BDriver;
 }
+
+bool radioDriversInitialized() { return radiosInitialized; }
 
 void checkBusy() {
   LOG_MSG("Checking busy: A_BUSY=%d B_BUSY=%d\n",
@@ -114,11 +118,19 @@ void initRadioDrivers() {
   getRadioDriverA().setMode(MODE_STDBY_RC);
   getRadioDriverB().setMode(MODE_STDBY_RC);
 
+  radiosInitialized = true;
+
   if (getRadioDriverA().checkDevice()) {
     LOG_MSG("Radio A initialized successfully\n");
+  } else {
+    LOG_MSG("Failed to initialize Radio A!\n");
+    radiosInitialized = false;
   }
   if (getRadioDriverB().checkDevice()) {
     LOG_MSG("Radio B initialized successfully\n");
+  } else {
+    LOG_MSG("Failed to initialize Radio B!\n");
+    radiosInitialized = false;
   }
 }
 

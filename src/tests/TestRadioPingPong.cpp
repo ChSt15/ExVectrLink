@@ -61,7 +61,7 @@ public:
   void taskInit() override {
     LOG_MSG("Setting up radio self test task\n");
     radioA.enableTxRx(true);
-    radioB.enableTxRx(true);
+    radioB.enableTxRx(false);
     radioA.cadBeforeSend(true);
     radioB.cadBeforeSend(true);
 
@@ -92,21 +92,22 @@ public:
       addPacketLatency(latency, packetOk);
       setRelease(Core::NOW() + 1 * Core::SECONDS);
     });
-    radioB.addReceiveHandler([this](const VCTR::network::DataPacket &packet) {
-      auto time = Core::NOW();
-      auto latency = time - packetSentRadioATime;
-      packetSentRadioBTime = time;
-      radioB.transmitDataframe(packet);
-      bool packetOk = true;
-      for (size_t i = 0; i < packet.payload.size(); i++) {
-        if (packet.payload[i] != i) {
-          packetOk = false;
-          break;
-        }
-      }
-      addPacketLatency(latency, packetOk);
-      setRelease(Core::NOW() + 1 * Core::SECONDS);
-    });
+    // radioB.addReceiveHandler([this](const VCTR::network::DataPacket &packet)
+    // {
+    //   auto time = Core::NOW();
+    //   auto latency = time - packetSentRadioATime;
+    //   packetSentRadioBTime = time;
+    //   radioB.transmitDataframe(packet);
+    //   bool packetOk = true;
+    //   for (size_t i = 0; i < packet.payload.size(); i++) {
+    //     if (packet.payload[i] != i) {
+    //       packetOk = false;
+    //       break;
+    //     }
+    //   }
+    //   addPacketLatency(latency, packetOk);
+    //   setRelease(Core::NOW() + 1 * Core::SECONDS);
+    // });
   }
 
   void taskThread() override {
@@ -115,7 +116,7 @@ public:
     for (size_t i = 0; i < packetSize; i++) {
       packet.payload.append(i);
     }
-    radioB.transmitDataframe(packet);
+    radioA.transmitDataframe(packet);
     restarts++;
   }
 };

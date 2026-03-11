@@ -15,6 +15,8 @@ namespace VCTR::ExVectrLink::radio {
 VCTR::network::datalink::SX128XLT &getRadioDriverA();
 VCTR::network::datalink::SX128XLT &getRadioDriverB();
 
+bool radioDriversInitialized();
+
 void initRadioDrivers();
 
 void checkBusy();

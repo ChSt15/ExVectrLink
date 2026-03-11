@@ -14,11 +14,13 @@
 #include "WifiUpload.hpp"
 
 #include "DatalinkSetup.hpp"
+#include "DiversitySetup.hpp"
+#include "FhssSetup.hpp"
 
 using namespace VCTR;
 using namespace VCTR::ExVectrLink;
 
-HardwareSerial linkSerialPort(0);
+HardwareSerial linkSerialPort(1);
 Platform::BusUART serialBus(linkSerialPort);
 SerialTelecoms serialTelecoms(serialBus);
 
@@ -38,15 +40,36 @@ public:
 };
 TempMonitor tempMonitor;
 
+class ErrorSender : public Core::Task_Periodic {
+public:
+  ErrorSender() : Core::Task_Periodic("ErrorSender", 1 * Core::SECONDS) {
+    Core::getSystemScheduler().addTask(*this);
+  }
+
+  void taskInit() override {}
+
+  void taskThread() override {
+    auto error = !radio::radioDriversInitialized();
+    // network::DataPacket packet;
+    // packet.payload.setSize(5);
+    // datalink::getFhss().transmitDataframe(packet);
+    if (error) {
+      serialTelecoms.sendSerialPacket(packets::Error,
+                                      "Failed to initialize radios", 28);
+    }
+  }
+};
+ErrorSender errorSender;
+
 void setup() {
 
   pinMode(HardwareConfig::button, INPUT_PULLUP);
 
   Serial.begin(115200);
-  linkSerialPort.begin(115200, SERIAL_8N1, HardwareConfig::serialRx,
+  linkSerialPort.begin(460800, SERIAL_8N1, HardwareConfig::serialRx,
                        HardwareConfig::serialTx);
 
-  setCpuFrequencyMhz(80);
+  setCpuFrequencyMhz(160);
 
   delay(500);
   uint8_t count = 0;
@@ -67,17 +90,25 @@ void setup() {
   Core::initialise();
 
   ExVectrLink::radio::initRadioDrivers();
+  ExVectrLink::datalink::initCommandManager(serialTelecoms);
 
   WifiUpload::initWifiUpload(serialTelecoms);
 
-  ExVectrLink::datalink::getDatalinkRadioA().setPAdbm(
-      HardwareConfig::sx1280APAdbm);
-  ExVectrLink::datalink::getDatalinkRadioB().setPAdbm(
-      HardwareConfig::sx1280BPAdbm);
-  ExVectrLink::datalink::getDatalinkRadioA().setTxMaxPower(
-      HardwareConfig::sx1280AMaxPower);
-  ExVectrLink::datalink::getDatalinkRadioB().setTxMaxPower(
-      HardwareConfig::sx1280BMaxPower);
+  auto &radioA = ExVectrLink::datalink::getDatalinkRadioA();
+  auto &radioB = ExVectrLink::datalink::getDatalinkRadioB();
+
+  auto radioSetup = [](VCTR::network::datalink::Datalink_SX1280 &radio) {
+    radio.setBandwidth(VCTR::network::datalink::BW_800KHz);
+    radio.setCodingRate(VCTR::network::datalink::LI_4_6);
+    radio.setSpreadingFactor(VCTR::network::datalink::SF_6);
+    radio.setChannel(0);
+    radio.enableTxRx(true);
+    radio.cadBeforeSend(true);
+    radio.setTxPower(12);
+  };
+
+  radioSetup(radioA);
+  radioSetup(radioB);
 
   // Core::getSystemScheduler().removeTask(serialTelecoms);
 }

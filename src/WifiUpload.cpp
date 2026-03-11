@@ -22,8 +22,8 @@ namespace VCTR::WifiUpload {
 
 using namespace VCTR::ExVectrLink;
 
-const char *ssid = "WIFICC";
-const char *password = "R8765432109R";
+extern const char *ssid;
+extern const char *password;
 
 SerialTelecoms *serialTelecomsPtr = nullptr;
 
