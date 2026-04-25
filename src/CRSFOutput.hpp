@@ -57,7 +57,7 @@ private:
   VCTR::packets::telecoms::Telemetry_GNSS pendingGpsTelemetry_;
   bool batteryTelemetryPending_ = false;
   bool gpsTelemetryPending_ = false;
-    PendingTelemetryKind nextPendingTelemetryKind_ =
+  PendingTelemetryKind nextPendingTelemetryKind_ =
       PendingTelemetryKind::Battery;
   int64_t lastPacketTime_ = 0;
 

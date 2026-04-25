@@ -125,10 +125,11 @@ void CRSFOutput::sendPendingTelemetry() {
 bool CRSFOutput::queueNextPendingTelemetry() {
   for (uint8_t attempt = 0; attempt < 2; attempt++) {
     const PendingTelemetryKind kind =
-        attempt == 0 ? nextPendingTelemetryKind_
-                     : (nextPendingTelemetryKind_ == PendingTelemetryKind::Battery
-                            ? PendingTelemetryKind::Gps
-                            : PendingTelemetryKind::Battery);
+        attempt == 0
+            ? nextPendingTelemetryKind_
+            : (nextPendingTelemetryKind_ == PendingTelemetryKind::Battery
+                   ? PendingTelemetryKind::Gps
+                   : PendingTelemetryKind::Battery);
 
     if (kind == PendingTelemetryKind::Battery && batteryTelemetryPending_) {
       packetManager_.sendPacket(pendingBatteryTelemetry_);
