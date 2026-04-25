@@ -13,13 +13,13 @@
 namespace VCTR::ExVectrLink::radio {
 
 VCTR::network::datalink::SX128XLT &getRadioDriverA();
+#if defined(HAS_DIVERSITY)
 VCTR::network::datalink::SX128XLT &getRadioDriverB();
+#endif
 
 bool radioDriversInitialized();
 
 void initRadioDrivers();
-
-void checkBusy();
 
 } // namespace VCTR::ExVectrLink::radio
 

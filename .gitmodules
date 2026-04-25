@@ -19,3 +19,6 @@
 [submodule "lib/ExVectrLink"]
 	path = lib/ExVectrLink
 	url = https://github.com/ExVeCtr/ExVectrLink.git
+[submodule "lib/SBUS"]
+	path = lib/SBUS
+	url = https://github.com/bolderflight/sbus.git

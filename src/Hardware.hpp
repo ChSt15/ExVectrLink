@@ -9,4 +9,12 @@
 #include "targets/ExVectrControllerLink.hpp"
 #endif
 
+#if defined(TARGET_GENERICESP8285)
+#include "targets/GenericEsp8266.hpp"
+#endif
+
+#if defined(TARGET_GENERICESP8285WITHPA)
+#include "targets/GenericEsp8266WithPA.hpp"
+#endif
+
 #endif // EXVECRLINK_HARDWARE_HPP

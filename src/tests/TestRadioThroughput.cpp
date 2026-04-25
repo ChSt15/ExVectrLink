@@ -10,7 +10,7 @@
 #include "Hardware.hpp"
 
 #include "DatalinkSetup.hpp"
-#include "ExVectrNetwork/datalink/sx1280/Sx1280.hpp"
+#include "ExVectrNetwork/datalink/sx1280/Sx1280_2.hpp"
 
 namespace VCTR::ExVectrLink {
 
@@ -20,7 +20,7 @@ using namespace VCTR::network::datalink;
 
 auto bandwidth = SX1280_BW::BW_800KHz;
 auto codingRate = SX1280_CR::LI_4_8;
-auto spreadingFactor = SX1280_SF::SF_9;
+auto spreadingFactor = SX1280_SF::SF_6;
 auto frequency = 2445000000;
 
 /**
@@ -31,14 +31,14 @@ auto frequency = 2445000000;
  */
 class RadioThroughputTestTx : public Core::Task_Periodic {
 private:
-  VCTR::network::datalink::Datalink_SX1280 &radio;
+  VCTR::network::datalink::Datalink_SX1280_V2 &radio;
 
   uint8_t packetCount = 0;
 
   const size_t packetSize = 18;
 
 public:
-  RadioThroughputTestTx(VCTR::network::datalink::Datalink_SX1280 &radio)
+  RadioThroughputTestTx(VCTR::network::datalink::Datalink_SX1280_V2 &radio)
       : Task_Periodic("Radio Throughput test tx", 1 * Core::SECONDS),
         radio(radio) {
     Core::getSystemScheduler().addTask(*this);
@@ -46,8 +46,7 @@ public:
 
   void taskInit() override {
     LOG_MSG("Setting up radio self test task\n");
-    radio.enableTxRx(true);
-    radio.cadBeforeSend(false);
+    radio.setEnableTxRx(true);
     radio.setTxPower(0);
 
     radio.setBandwidth(bandwidth);
@@ -74,7 +73,7 @@ public:
 
 class RadioThroughputTestRx : public Core::Task_Periodic {
 private:
-  VCTR::network::datalink::Datalink_SX1280 &radio;
+  VCTR::network::datalink::Datalink_SX1280_V2 &radio;
 
   uint8_t lastPacketCount = 0;
 
@@ -86,7 +85,7 @@ private:
   int64_t lastLoopTime = 0;
 
 public:
-  RadioThroughputTestRx(VCTR::network::datalink::Datalink_SX1280 &radio)
+  RadioThroughputTestRx(VCTR::network::datalink::Datalink_SX1280_V2 &radio)
       : Task_Periodic("Radio Throughput test rx", 1 * Core::SECONDS),
         radio(radio) {
     Core::getSystemScheduler().addTask(*this);
@@ -94,8 +93,7 @@ public:
 
   void taskInit() override {
     LOG_MSG("Setting up radio self test task\n");
-    radio.enableTxRx(true);
-    radio.cadBeforeSend(false);
+    radio.setEnableTxRx(true);
 
     radio.setBandwidth(bandwidth);
     radio.setCodingRate(codingRate);
@@ -134,12 +132,12 @@ public:
     float dTime = (Core::NOW() - lastLoopTime) / (float)Core::SECONDS;
     lastLoopTime = Core::NOW();
     float throughputBytesPerSecond = totalBytesReceived / dTime;
-    LOG_MSG("\nRadio Throughput Test Report: \nTotal Packets Received: %d, "
-            "\nTotal Packets Lost: %d, \nTotal Bytes Received: %d, "
-            "\nThroughput (Bytes/s): %f\n",
-            totalPacketsReceived, totalPacketsLost, totalBytesReceived,
-            throughputBytesPerSecond);
-    Serial.print("Radio Throughput Test Report: Total Packets Received: ");
+    Serial.printf(
+        "\nRadio Throughput Test Report: \nTotal Packets Received: %d, "
+        "\nTotal Packets Lost: %d, \nTotal Bytes Received: %d, "
+        "\nThroughput (Bytes/s): %f\n",
+        totalPacketsReceived, totalPacketsLost, totalBytesReceived,
+        throughputBytesPerSecond);
 
     // Reset counters for next report
     totalBytesReceived = 0;
