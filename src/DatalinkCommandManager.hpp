@@ -14,8 +14,9 @@ struct RemoteLinkStats {
   uint8_t antenna = 0;
   uint8_t linkQuality = 0; ///< 0-100 %
   int8_t txPowerdBm = 0;   ///< dBm, 1-32
-  int8_t rssi = 0;         ///< dBm (negative)
-  int8_t snr = 0;          ///< dB (-15 to +15)
+  bool dynamicPower = false;
+  int8_t rssi = 0; ///< dBm (negative)
+  int8_t snr = 0;  ///< dB (-15 to +15)
   bool valid = false;
 };
 

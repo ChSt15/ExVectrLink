@@ -27,6 +27,7 @@ CRSFOutput::CRSFOutput()
         network::DataPacket packet;
         packet.payload = payload;
         packet.payload.append((uint8_t)datalink::PacketTypes::Data);
+
         datalink::getFhss().transmitDataframe(packet);
       }) {
   Core::getSystemScheduler().addTask(*this);
@@ -64,6 +65,7 @@ void CRSFOutput::taskInit() {
       .addPacketReceiveHandler<VCTR::packets::radiolink::RadioLinkPacket_A4D4>(
           [this](const VCTR::packets::radiolink::RadioLinkPacket_A4D4 &packet) {
             packet_ = packet;
+            newRcPacket = true;
             lastPacketTime_ = Core::NOW();
             // Wake up task immediately so we output the frame ASAP
             this->setDeadline(Core::NOW());
@@ -82,25 +84,9 @@ void CRSFOutput::taskThread() {
 
   sendPendingTelemetry();
 
-  const bool hasRecentPacket =
-      (Core::NOW() - lastPacketTime_) < Core::MILLISECONDS * 200;
-
-  if (hasRecentPacket) {
+  if (newRcPacket) {
     writeRcChannelsFrame();
-  } else {
-    // No recent data – send centred channels so the FC sees us but can
-    // trigger its own failsafe logic from the stale link-stats values.
-    uint16_t channels[16];
-    for (uint8_t i = 0; i < 16; i++)
-      channels[i] = CRSF_CHANNEL_MID;
-
-    uint8_t frame[26];
-    frame[0] = CRSF_SYNC_BYTE;
-    frame[1] = 24; // type(1) + payload(22) + crc(1)
-    frame[2] = CRSF_FRAMETYPE_RC_CHANNELS;
-    packChannels(channels, &frame[3]);
-    frame[25] = calculateCRC(&frame[2], 23);
-    Serial.write(frame, 26);
+    newRcPacket = false;
   }
 
   // Send link statistics at a lower cadence (~100 ms)
@@ -265,22 +251,33 @@ void CRSFOutput::writeLinkStatsFrame() {
   // TX power: use remote (TX side) power so the FC sees what the transmitter
   // is doing. Fall back to local power if no OTA telemetry received yet.
   const auto &remote = datalink::getRemoteLinkStats();
+  // txPower in dBm
   const int8_t reportedTxDbm = remote.txPowerdBm;
+
+  // Index power order is:
+  // 0mW, 10mW, 25mW, 100mW, 500mW, 1000mW, 2000mW, 250mW, 50mW.
   uint8_t txPowerIdx;
-  if (reportedTxDbm <= 0)
+  if (reportedTxDbm <= 0) {
     txPowerIdx = 0; // 0 mW
-  else if (reportedTxDbm <= 10)
-    txPowerIdx = 1; // ~10 mW
-  else if (reportedTxDbm <= 14)
-    txPowerIdx = 2; // ~25 mW
-  else if (reportedTxDbm <= 20)
-    txPowerIdx = 3; // ~100 mW
-  else if (reportedTxDbm <= 27)
-    txPowerIdx = 4; // ~500 mW
-  else if (reportedTxDbm <= 30)
-    txPowerIdx = 5; // ~1 W
-  else
-    txPowerIdx = 6; // ~2 W
+  } else if (reportedTxDbm <= 10) {
+    txPowerIdx = 1; // 10 mW
+  } else if (reportedTxDbm <= 14) {
+    txPowerIdx = 2; // 25 mW
+  } else if (reportedTxDbm <= 17) {
+    txPowerIdx = 8; // 50 mW
+  } else if (reportedTxDbm <= 20) {
+    txPowerIdx = 3; // 100 mW
+  } else if (reportedTxDbm <= 24) {
+    txPowerIdx = 7; // 250 mW
+  } else if (reportedTxDbm <= 27) {
+    txPowerIdx = 4; // 500 mW
+  } else if (reportedTxDbm <= 30) {
+    txPowerIdx = 5; // 1000 mW
+  } else if (reportedTxDbm <= 33) {
+    txPowerIdx = 6; // 2000 mW
+  } else {
+    txPowerIdx = 0;
+  }
 
   // ── Build the 14-byte CRSF link-statistics frame ──
   // [sync 0xC8] [len 12] [type 0x14] [payload 10B] [crc]

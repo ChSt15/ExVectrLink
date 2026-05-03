@@ -20,6 +20,7 @@
 
 #include "DatalinkSetup.hpp"
 #include "DiversitySetup.hpp"
+#include "DynamicPowerSetup.hpp"
 #include "FhssSetup.hpp"
 
 #include "sbus.h"
@@ -410,8 +411,8 @@ void setup() {
   VCTR::ExVectrLink::datalink::getFhss().setIsRxSide(true);
 #else
   VCTR::ExVectrLink::datalink::getFhss().setIsRxSide(false);
-  // VCTR::ExVectrLink::datalink::getSx1280Diversity().setDesignatedTxLink(
-  //     VCTR::ExVectrLink::datalink::getDatalinkRadioA());
+  VCTR::ExVectrLink::datalink::getSx1280Diversity().setDesignatedTxLink(
+      VCTR::ExVectrLink::datalink::getDatalinkRadioA());
 #endif
 
 #if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF)
@@ -431,7 +432,7 @@ void setup() {
 
   auto radioSetup = [](VCTR::network::datalink::Datalink_SX1280_V2 &radio) {
     radio.setBandwidth(VCTR::network::datalink::BW_800KHz);
-    radio.setCodingRate(VCTR::network::datalink::LI_4_6);
+    radio.setCodingRate(VCTR::network::datalink::LI_4_8);
     radio.setSpreadingFactor(VCTR::network::datalink::SF_7);
     radio.setPacketMode(VCTR::network::datalink::SX1280_PacketMode::Limited);
     radio.setFixedPacketLength(11);
@@ -447,6 +448,11 @@ void setup() {
 #if defined(HAS_DIVERSITY)
   radioSetup(radioB);
 #endif
+
+  ExVectrLink::datalink::getDynamicPower().setMaxPower(
+      HardwareConfig::sx1280AMaxPower);
+  ExVectrLink::datalink::getDynamicPower().setPower(20);
+  ExVectrLink::datalink::setupDynamicPower();
 
 #if defined(ENABLE_SBUS) || defined(ENABLE_CRSF)
   Core::getSystemScheduler().removeTask(serialTelecoms);

@@ -18,7 +18,7 @@ constexpr int sx1280ARxEn = 3;
 constexpr int sx1280ATxEn = 2;
 // constexpr int sx1280ARxEn = 2;
 // constexpr int sx1280ATxEn = 3;
-constexpr int sx1280APAdbm = 27;
+constexpr int sx1280APAdbm = 26;
 constexpr int sx1280AMaxPower = 27;
 
 // Radio B is Horizontal antenna
@@ -30,7 +30,7 @@ constexpr int sx1280BRxEn = 7;
 constexpr int sx1280BTxEn = 6;
 // constexpr int sx1280BRxEn = 6;
 // constexpr int sx1280BTxEn = 7;
-constexpr int sx1280BPAdbm = 27;
+constexpr int sx1280BPAdbm = 26;
 constexpr int sx1280BMaxPower = 27;
 
 constexpr int ledRgb = -1; // Not used, set to -1

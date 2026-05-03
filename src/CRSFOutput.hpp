@@ -61,6 +61,8 @@ private:
       PendingTelemetryKind::Battery;
   int64_t lastPacketTime_ = 0;
 
+  bool newRcPacket = false;
+
   // Link-stats cadence counter (send every N-th taskThread call)
   uint8_t linkStatsCounter_ = 0;
   static constexpr uint8_t LINK_STATS_INTERVAL =

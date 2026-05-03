@@ -8,6 +8,7 @@
 
 #include "DatalinkSetup.hpp"
 #include "DiversitySetup.hpp"
+#include "DynamicPowerSetup.hpp"
 #include "FhssSetup.hpp"
 
 #include "DatalinkCommandManager.hpp"
@@ -18,15 +19,20 @@ using namespace VCTR::ExVectrLink::packets;
 
 uint8_t packetNumber = 0;
 
-/// Current TX power in dBm, tracked from SerialPacket_SetTxPower so it can be
-/// reported in outgoing OTA LinkInfo packets.
-static int8_t currentTxPowerdBm = 20;
-
 /// Decoded far-end link stats from the last received OTA LinkInfo packet.
 static RemoteLinkStats remoteStats;
 
-int8_t getLocalTxPowerdBm() { return currentTxPowerdBm; }
 const RemoteLinkStats &getRemoteLinkStats() { return remoteStats; }
+
+int8_t getLocalTxPowerdBm() { return getDynamicPower().getPower(); }
+
+static void applyLocalTxPowerToRadios() {
+  const int8_t txPowerDbm = getLocalTxPowerdBm();
+  getDatalinkRadioA().setTxPower(txPowerDbm);
+#if defined(HAS_DIVERSITY)
+  getDatalinkRadioB().setTxPower(txPowerDbm);
+#endif
+}
 
 VCTR::ExVectrLink::SerialTelecoms *serialTelecomsPtr = nullptr;
 
@@ -35,21 +41,24 @@ VCTR::Core::StaticCallback_Subscriber<const char *> logSubscriber;
 SerialPacket_LinkInfo linkInfoPacket;
 
 // ---------------------------------------------------------------------------
-// Helpers: encode / decode the compact 4-byte OTA LinkInfo payload
+// Helpers: encode / decode the compact 5-byte OTA LinkInfo payload
 //
-// Bit layout (27 bits used, 5 spare):
+// Bit layout (28 bits used, 12 spare):
 //   Byte 0  [7:5] antenna  (3 bits, 0-7)
 //           [4:0] LQ[6:2]  (upper 5 bits of 7-bit quality field)
 //   Byte 1  [7:6] LQ[1:0]  (lower 2 bits of 7-bit quality field)
 //           [5:1] txPower  (5 bits, value 0-31 → 1-32 dBm)
 //           [0]   spare
 //   Byte 2  [7:0] RSSI magnitude (abs dBm, 0-127)
-//   Byte 3  [7:4] SNR     (4 bits, 0-15 → -15 to +15 dB in 2 dB steps)
-//           [3:0] spare
+//   Byte 3  [7:3] SNR     (5 bits, 0-30 → -15 to +15 dB in 1 dB steps)
+//           [2:0] spare
+//   Byte 4  [0]   dynamicPower
+//           [7:1] spare
 // ---------------------------------------------------------------------------
 
 static void encodeLinkInfo(uint8_t antenna, float lq, int8_t txPowerdBm,
-                           int16_t rssi, float snr, uint8_t out[4]) {
+                           int16_t rssi, float snr, bool dynamicPower,
+                           uint8_t out[5]) {
   uint8_t antVal = antenna & 0x07;
   uint8_t lqVal = (uint8_t)(lq * 127.0f + 0.5f) & 0x7F;
   int8_t pwr = txPowerdBm < 1 ? 1 : (txPowerdBm > 32 ? 32 : txPowerdBm);
@@ -57,23 +66,26 @@ static void encodeLinkInfo(uint8_t antenna, float lq, int8_t txPowerdBm,
   int16_t mag = rssi < 0 ? -rssi : rssi;
   uint8_t rssiVal = (uint8_t)(mag > 127 ? 127 : mag);
   float snrC = snr < -15.0f ? -15.0f : (snr > 15.0f ? 15.0f : snr);
-  uint8_t snrVal = (uint8_t)((snrC + 15.0f) / 2.0f + 0.5f) & 0x0F;
+  uint8_t snrVal = (uint8_t)(snrC + 15.0f + 0.5f) & 0x1F;
 
   out[0] = (uint8_t)((antVal << 5) | (lqVal >> 2));
   out[1] = (uint8_t)(((lqVal & 0x03) << 6) | (pwrVal << 1));
   out[2] = rssiVal;
-  out[3] = (uint8_t)(snrVal << 4);
+  out[3] = (uint8_t)(snrVal << 3);
+  out[4] = dynamicPower ? 0x01 : 0x00;
 }
 
-static void decodeLinkInfo(const uint8_t in[4], uint8_t &antenna, float &lq,
-                           int8_t &txPowerdBm, int8_t &rssi, float &snr) {
+static void decodeLinkInfo(const uint8_t in[5], uint8_t &antenna, float &lq,
+                           int8_t &txPowerdBm, int8_t &rssi, float &snr,
+                           bool &dynamicPower) {
   antenna = (in[0] >> 5) & 0x07;
   uint8_t lqRaw = (uint8_t)(((in[0] & 0x1F) << 2) | ((in[1] >> 6) & 0x03));
   lq = (float)lqRaw / 127.0f;
   txPowerdBm = (int8_t)(((in[1] >> 1) & 0x1F) + 1);
   rssi = -(int8_t)(in[2] & 0x7F);
-  uint8_t snrRaw = (in[3] >> 4) & 0x0F;
-  snr = (float)snrRaw * 2.0f - 15.0f;
+  uint8_t snrRaw = (in[3] >> 3) & 0x1F;
+  snr = (float)snrRaw - 15.0f;
+  dynamicPower = (in[4] & 0x01) != 0;
 }
 
 class LinkInfoSender : public VCTR::Core::Task_Periodic {
@@ -89,18 +101,22 @@ public:
       return;
     }
 
-    auto bestLinkIndex = getSx1280Diversity().getCurrentBestLinkIndex();
-    auto &bestLink = *getSx1280Diversity().getDiversityLink(bestLinkIndex);
+    auto &diversity = getSx1280Diversity();
+    auto bestLinkIndex = diversity.getCurrentBestLinkIndex();
+    auto &bestLink = *diversity.getDiversityLink(bestLinkIndex);
+    auto &dynamicPower = getDynamicPower();
 
     // --- Fill local side stats ---
-    linkInfoPacket.local.rssi = (int8_t)bestLink.lastPacketRSSI();
-    linkInfoPacket.local.snr = (int8_t)getFhss().getSnr();
+    linkInfoPacket.local.rssi = (int8_t)diversity.lastPacketRSSI();
+    linkInfoPacket.local.snr = (int8_t)diversity.lastPacketSNR();
     linkInfoPacket.local.antenna = (uint8_t)bestLinkIndex;
     linkInfoPacket.local.lossRate =
         (uint8_t)((1.0f - getFhss().getLinkQuality()) * 100);
     linkInfoPacket.local.linkQuality =
         (uint8_t)(getFhss().getLinkQuality() * 100);
-    linkInfoPacket.local.txPower = currentTxPowerdBm;
+    const int8_t localTxPowerdBm = getLocalTxPowerdBm();
+    linkInfoPacket.local.txPower = localTxPowerdBm;
+    linkInfoPacket.local.dynamicPower = dynamicPower.isDynamicPowerEnabled();
 
     // --- Fill remote side stats (from last received OTA LinkTelemetry) ---
     linkInfoPacket.remote.rssi = remoteStats.rssi;
@@ -109,6 +125,7 @@ public:
     linkInfoPacket.remote.linkQuality = remoteStats.linkQuality;
     linkInfoPacket.remote.lossRate = (uint8_t)(100 - remoteStats.linkQuality);
     linkInfoPacket.remote.txPower = remoteStats.txPowerdBm;
+    linkInfoPacket.remote.dynamicPower = remoteStats.dynamicPower;
     linkInfoPacket.remoteValid = remoteStats.valid;
 
     if (getFhss().getFhssState() != FHSSState::Synced) {
@@ -120,13 +137,14 @@ public:
     serialTelecomsPtr->sendSerialPacket(linkInfoPacket);
 
     // Also broadcast our link stats to the other end over-the-air.
-    uint8_t payload[4];
+    uint8_t payload[5];
     encodeLinkInfo(linkInfoPacket.local.antenna, getFhss().getLinkQuality(),
-                   currentTxPowerdBm, linkInfoPacket.local.rssi,
-                   linkInfoPacket.local.snr, payload);
+                   localTxPowerdBm, linkInfoPacket.local.rssi,
+                   linkInfoPacket.local.snr, linkInfoPacket.local.dynamicPower,
+                   payload);
 
     network::DataPacket otaPkt;
-    for (size_t i = 0; i < 4; i++) {
+    for (size_t i = 0; i < 5; i++) {
       otaPkt.payload.append(payload[i]);
     }
     otaPkt.payload.append((uint8_t)PacketTypes::LinkTelemetry);
@@ -175,13 +193,20 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
 #endif
       });
 
-  serialTelecoms.addSerialPacketHandler<SerialPacket_SetTxPower>(
-      [&serialTelecoms](const SerialPacket_SetTxPower &packet) {
-        currentTxPowerdBm = packet.txPower;
-        getDatalinkRadioA().setTxPower(packet.txPower);
-#if defined(HAS_DIVERSITY)
-        getDatalinkRadioB().setTxPower(packet.txPower);
-#endif
+  serialTelecoms.addSerialPacketHandler<SerialPacket_SetPowerParams>(
+      [](const SerialPacket_SetPowerParams &packet) {
+        auto &dynamicPower = getDynamicPower();
+        const uint8_t requestedPower =
+            (packet.txPower == 0) ? 255 : packet.txPower;
+
+        // dynamicPower.setMaxPower(requestedPower);
+        dynamicPower.setEnableDynamicPower(packet.enableDynamicPower);
+
+        if (!packet.enableDynamicPower) {
+          dynamicPower.setPower(requestedPower);
+        }
+
+        applyLocalTxPowerToRadios();
       });
 
   serialTelecoms.addSerialPacketHandler<SerialPacket_SetLinkChannel>(
@@ -214,10 +239,8 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
 
         } else if (pktType == (uint8_t)PacketTypes::LinkTelemetry) {
           // Decode the 4-byte OTA link telemetry and forward to serial host.
-          if (packet.payload.size() < 5)
+          if (packet.payload.size() < 6)
             return;
-          uint8_t rawBytes[4] = {packet.payload[0], packet.payload[1],
-                                 packet.payload[2], packet.payload[3]};
           // Decode into remoteStats cache; the next LinkInfoSender tick will
           // bundle this into the combined SerialPacket_LinkInfo sent to the
           // host.
@@ -226,7 +249,11 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
           int8_t remRssi;
           int8_t remTxPwr;
           uint8_t remAnt;
-          decodeLinkInfo(rawBytes, remAnt, lq, remTxPwr, remRssi, snrF);
+          bool remDynamicPower;
+          decodeLinkInfo(packet.payload.getPtr(), remAnt, lq, remTxPwr, remRssi,
+                         snrF, remDynamicPower);
+
+          updateDynamicPowerFromRemoteLinkInfo(remRssi, (int8_t)snrF, lq * 100);
 
           remoteStats.antenna = remAnt;
           remoteStats.linkQuality = (uint8_t)(lq * 100);
@@ -234,6 +261,7 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
           remoteStats.rssi = remRssi;
           remoteStats.snr = (int8_t)snrF;
           remoteStats.valid = true;
+          remoteStats.dynamicPower = remDynamicPower;
         }
         // Other types are silently ignored for now.
       });

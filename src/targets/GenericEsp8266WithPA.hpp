@@ -16,7 +16,7 @@ constexpr int sx1280ANss = 15;
 constexpr int sx1280ARst = 2;
 constexpr int sx1280ARxEn = 9;
 constexpr int sx1280ATxEn = 10;
-constexpr int sx1280APAdbm = 20;
+constexpr int sx1280APAdbm = 19;
 constexpr int sx1280AMaxPower = 20;
 
 constexpr int ledRgb = -1; // Not available or set to -1
