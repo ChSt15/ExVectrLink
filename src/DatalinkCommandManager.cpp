@@ -19,15 +19,18 @@ using namespace VCTR::ExVectrLink::packets;
 
 uint8_t packetNumber = 0;
 
+int64_t rxDeviceTime = 0;
+int32_t rxDesyncCount = 0;
+
 /// Decoded far-end link stats from the last received OTA LinkInfo packet.
 static RemoteLinkStats remoteStats;
 
 const RemoteLinkStats &getRemoteLinkStats() { return remoteStats; }
 
-int8_t getLocalTxPowerdBm() { return getDynamicPower().getPower(); }
+int8_t getLocalTxPowerdBm() { return getDatalinkRadioA().getTxPower(); }
 
 static void applyLocalTxPowerToRadios() {
-  const int8_t txPowerDbm = getLocalTxPowerdBm();
+  const int8_t txPowerDbm = getDynamicPower().getPower();
   getDatalinkRadioA().setTxPower(txPowerDbm);
 #if defined(HAS_DIVERSITY)
   getDatalinkRadioB().setTxPower(txPowerDbm);
@@ -56,11 +59,16 @@ SerialPacket_LinkInfo linkInfoPacket;
 //           [7:1] spare
 // ---------------------------------------------------------------------------
 
+static uint8_t quantizeLinkQualityPercent(float lq) {
+  float clamped = lq < 0.0f ? 0.0f : (lq > 1.0f ? 1.0f : lq);
+  return (uint8_t)(clamped * 100.0f + 0.5f);
+}
+
 static void encodeLinkInfo(uint8_t antenna, float lq, int8_t txPowerdBm,
                            int16_t rssi, float snr, bool dynamicPower,
                            uint8_t out[5]) {
   uint8_t antVal = antenna & 0x07;
-  uint8_t lqVal = (uint8_t)(lq * 127.0f + 0.5f) & 0x7F;
+  uint8_t lqVal = quantizeLinkQualityPercent(lq);
   int8_t pwr = txPowerdBm < 1 ? 1 : (txPowerdBm > 32 ? 32 : txPowerdBm);
   uint8_t pwrVal = (uint8_t)(pwr - 1) & 0x1F;
   int16_t mag = rssi < 0 ? -rssi : rssi;
@@ -80,7 +88,7 @@ static void decodeLinkInfo(const uint8_t in[5], uint8_t &antenna, float &lq,
                            bool &dynamicPower) {
   antenna = (in[0] >> 5) & 0x07;
   uint8_t lqRaw = (uint8_t)(((in[0] & 0x1F) << 2) | ((in[1] >> 6) & 0x03));
-  lq = (float)lqRaw / 127.0f;
+  lq = (float)lqRaw / 100.0f;
   txPowerdBm = (int8_t)(((in[1] >> 1) & 0x1F) + 1);
   rssi = -(int8_t)(in[2] & 0x7F);
   uint8_t snrRaw = (in[3] >> 3) & 0x1F;
@@ -88,10 +96,30 @@ static void decodeLinkInfo(const uint8_t in[5], uint8_t &antenna, float &lq,
   dynamicPower = (in[4] & 0x01) != 0;
 }
 
+static void encodeRxState(uint32_t deviceTime, uint16_t desyncCount,
+                          uint8_t out[8]) {
+  int32_t time = (int32_t)(deviceTime & 0xFFFFFFFF);
+  memcpy(out, &time, 4);
+  out[4] = (uint8_t)(desyncCount & 0xFF);
+  out[5] = (uint8_t)((desyncCount >> 8) & 0xFF);
+  // Remaining bytes are spare.
+}
+
+static void decodeRxState(const uint8_t in[8], uint32_t &deviceTime,
+                          uint16_t &desyncCount) {
+  int32_t time;
+  memcpy(&time, in, 4);
+  deviceTime = (uint32_t)time;
+  desyncCount = (uint16_t)in[4] | ((uint16_t)in[5] << 8);
+}
+
 class LinkInfoSender : public VCTR::Core::Task_Periodic {
+
+  int64_t lastRxStatePacketSendTime = 0;
+
 public:
   // Run at 4 Hz (every 250 ms).
-  LinkInfoSender() : Task_Periodic("LinkInfoSender", 250 * Core::MILLISECONDS) {
+  LinkInfoSender() : Task_Periodic("LinkInfoSender", 200 * Core::MILLISECONDS) {
     VCTR::Core::getSystemScheduler().addTask(*this);
   }
 
@@ -101,6 +129,15 @@ public:
       return;
     }
 
+    if (Core::NowNs() - lastRxStatePacketSendTime > 1000 * Core::MILLISECONDS) {
+      lastRxStatePacketSendTime = Core::NowNs();
+      sendRxStatePacket();
+    } else {
+      sendLinkTelemetryPacket();
+    }
+  }
+
+  void sendLinkTelemetryPacket() {
     auto &diversity = getSx1280Diversity();
     auto bestLinkIndex = diversity.getCurrentBestLinkIndex();
     auto &bestLink = *diversity.getDiversityLink(bestLinkIndex);
@@ -110,13 +147,15 @@ public:
     linkInfoPacket.local.rssi = (int8_t)diversity.lastPacketRSSI();
     linkInfoPacket.local.snr = (int8_t)diversity.lastPacketSNR();
     linkInfoPacket.local.antenna = (uint8_t)bestLinkIndex;
-    linkInfoPacket.local.lossRate =
-        (uint8_t)((1.0f - getFhss().getLinkQuality()) * 100);
-    linkInfoPacket.local.linkQuality =
-        (uint8_t)(getFhss().getLinkQuality() * 100);
+    const uint8_t localLinkQuality =
+        quantizeLinkQualityPercent(getFhss().getLinkQuality());
+    linkInfoPacket.local.linkQuality = localLinkQuality;
+    linkInfoPacket.local.lossRate = (uint8_t)(100 - localLinkQuality);
     const int8_t localTxPowerdBm = getLocalTxPowerdBm();
     linkInfoPacket.local.txPower = localTxPowerdBm;
     linkInfoPacket.local.dynamicPower = dynamicPower.isDynamicPowerEnabled();
+    linkInfoPacket.local.deviceTime = (int32_t)(Core::NowNs() / Core::SECONDS);
+    linkInfoPacket.local.desyncCount = getFhss().getDesyncCounter();
 
     // --- Fill remote side stats (from last received OTA LinkTelemetry) ---
     linkInfoPacket.remote.rssi = remoteStats.rssi;
@@ -126,30 +165,48 @@ public:
     linkInfoPacket.remote.lossRate = (uint8_t)(100 - remoteStats.linkQuality);
     linkInfoPacket.remote.txPower = remoteStats.txPowerdBm;
     linkInfoPacket.remote.dynamicPower = remoteStats.dynamicPower;
+    linkInfoPacket.remote.deviceTime = rxDeviceTime;
+    linkInfoPacket.remote.desyncCount = rxDesyncCount;
+
     linkInfoPacket.remoteValid = remoteStats.valid;
 
     if (getFhss().getFhssState() != FHSSState::Synced) {
       // If not synced, override link quality to 0 and mark remote as invalid.
       linkInfoPacket.remote.linkQuality = 0;
+      linkInfoPacket.remoteValid = false;
     }
 
     // Send combined stats to the serial host.
     serialTelecomsPtr->sendSerialPacket(linkInfoPacket);
 
     // Also broadcast our link stats to the other end over-the-air.
-    uint8_t payload[5];
+    uint8_t payload[8];
     encodeLinkInfo(linkInfoPacket.local.antenna, getFhss().getLinkQuality(),
                    localTxPowerdBm, linkInfoPacket.local.rssi,
                    linkInfoPacket.local.snr, linkInfoPacket.local.dynamicPower,
                    payload);
 
     network::DataPacket otaPkt;
-    for (size_t i = 0; i < 5; i++) {
+    for (size_t i = 0; i < 8; i++) {
       otaPkt.payload.append(payload[i]);
     }
     otaPkt.payload.append((uint8_t)PacketTypes::LinkTelemetry);
     getFhss().transmitDataframe(otaPkt);
   }
+
+  void sendRxStatePacket() {
+
+    uint8_t payload[8];
+    encodeRxState(rxDeviceTime, getFhss().getDesyncCounter(), payload);
+
+    network::DataPacket otaPkt;
+    for (size_t i = 0; i < 8; i++) {
+      otaPkt.payload.append(payload[i]);
+    }
+    otaPkt.payload.append((uint8_t)PacketTypes::RxState);
+    getFhss().transmitDataframe(otaPkt);
+  }
+
 } linkInfoSender;
 
 void printToSerial(const char *const &message) {
@@ -196,14 +253,22 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
   serialTelecoms.addSerialPacketHandler<SerialPacket_SetPowerParams>(
       [](const SerialPacket_SetPowerParams &packet) {
         auto &dynamicPower = getDynamicPower();
-        const uint8_t requestedPower =
+        const uint8_t requestedMaxPower =
             (packet.txPower == 0) ? 255 : packet.txPower;
+        const uint8_t requestedDynMaxPower =
+            (packet.maxDynPower == 0) ? requestedMaxPower : packet.maxDynPower;
+        const uint8_t requestedDynMinPower = (packet.minDynPower == 0)
+                                                 ? DynamicPower::kPowerLevels[0]
+                                                 : packet.minDynPower;
 
-        // dynamicPower.setMaxPower(requestedPower);
+        dynamicPower.setMaxPower(requestedMaxPower);
         dynamicPower.setEnableDynamicPower(packet.enableDynamicPower);
 
+        dynamicPower.setDynMaxPower(requestedDynMaxPower);
+        dynamicPower.setDynMinPower(requestedDynMinPower);
+
         if (!packet.enableDynamicPower) {
-          dynamicPower.setPower(requestedPower);
+          dynamicPower.setPower(requestedMaxPower);
         }
 
         applyLocalTxPowerToRadios();
@@ -222,49 +287,71 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
       });
 
   // Receiving info from far end over FHSS
-  getFhss().addReceiveHandler(
-      [&serialTelecoms](const VCTR::network::DataPacket &packet) {
-        if (packet.payload.size() == 0) {
-          return;
-        }
+  getFhss().addReceiveHandler([&serialTelecoms](
+                                  const VCTR::network::DataPacket &packet) {
+    // Serial.printf("Received %d byte FHSS packet with payload: ",
+    //               packet.payload.size());
+    // for (size_t i = 0; i < packet.payload.size(); i++) {
+    //   Serial.print(packet.payload[i], HEX);
+    //   Serial.print(" ");
+    // }
+    // Serial.println();
+    // return;
 
-        // Last byte is always the packet type.
-        uint8_t pktType = packet.payload[packet.payload.size() - 1];
+    if (packet.payload.size() == 0) {
+      return;
+    }
+    // Last byte is always the packet type.
+    uint8_t pktType = packet.payload[packet.payload.size() - 1];
 
-        if (pktType == (uint8_t)PacketTypes::Data) {
-          // Strip the type byte and forward raw data to the serial host.
-          serialTelecoms.sendSerialPacket(SerialPacketType::PacketData,
-                                          packet.payload.getPtr(),
-                                          packet.payload.size() - 1);
+    if (pktType == (uint8_t)PacketTypes::Data) {
+      // Strip the type byte and forward raw data to the serial host.
+      serialTelecoms.sendSerialPacket(SerialPacketType::PacketData,
+                                      packet.payload.getPtr(),
+                                      packet.payload.size() - 1);
 
-        } else if (pktType == (uint8_t)PacketTypes::LinkTelemetry) {
-          // Decode the 4-byte OTA link telemetry and forward to serial host.
-          if (packet.payload.size() < 6)
-            return;
-          // Decode into remoteStats cache; the next LinkInfoSender tick will
-          // bundle this into the combined SerialPacket_LinkInfo sent to the
-          // host.
-          float lq;
-          float snrF;
-          int8_t remRssi;
-          int8_t remTxPwr;
-          uint8_t remAnt;
-          bool remDynamicPower;
-          decodeLinkInfo(packet.payload.getPtr(), remAnt, lq, remTxPwr, remRssi,
-                         snrF, remDynamicPower);
+    } else if (pktType == (uint8_t)PacketTypes::LinkTelemetry) {
+      // Decode the 5-byte OTA link telemetry and forward to serial host.
+      // if (packet.payload.size() < 8)
+      //   return;
+      // Decode into remoteStats cache; the next LinkInfoSender tick will
+      // bundle this into the combined SerialPacket_LinkInfo sent to the
+      // host.
+      float lq;
+      float snrF;
+      int8_t remRssi;
+      int8_t remTxPwr;
+      uint8_t remAnt;
+      bool remDynamicPower;
+      decodeLinkInfo(packet.payload.getPtr(), remAnt, lq, remTxPwr, remRssi,
+                     snrF, remDynamicPower);
+      const uint8_t remLqPercent = quantizeLinkQualityPercent(lq);
 
-          updateDynamicPowerFromRemoteLinkInfo(remRssi, (int8_t)snrF, lq * 100);
+      updateDynamicPowerFromRemoteLinkInfo(remRssi, (int8_t)snrF, remLqPercent);
 
-          remoteStats.antenna = remAnt;
-          remoteStats.linkQuality = (uint8_t)(lq * 100);
-          remoteStats.txPowerdBm = remTxPwr;
-          remoteStats.rssi = remRssi;
-          remoteStats.snr = (int8_t)snrF;
-          remoteStats.valid = true;
-          remoteStats.dynamicPower = remDynamicPower;
-        }
-        // Other types are silently ignored for now.
-      });
+      remoteStats.antenna = remAnt;
+      remoteStats.linkQuality = remLqPercent;
+      remoteStats.txPowerdBm = remTxPwr;
+      remoteStats.rssi = remRssi;
+      remoteStats.snr = (int8_t)snrF;
+      remoteStats.valid = true;
+      remoteStats.dynamicPower = remDynamicPower;
+
+    } else if (pktType == (uint8_t)PacketTypes::RxState) {
+
+      // Decode the 8-byte OTA RxState packet which contains the far end's
+      // device time and FHSS desync count. This is used for debugging and to
+      // trigger more frequent RxState packets from the far end if we detect
+      // they are out of sync.
+      uint32_t remDeviceTime;
+      uint16_t remDesyncCount;
+      decodeRxState(packet.payload.getPtr(), remDeviceTime, remDesyncCount);
+
+      rxDeviceTime = remDeviceTime;
+      rxDesyncCount = remDesyncCount;
+    }
+    // Other types are silently ignored for now.
+  });
 
   // getFhss().addChannelBlockedChangeHandler(
   //     [&serialTelecoms](bool blocked, uint8_t maxPacketSize) {

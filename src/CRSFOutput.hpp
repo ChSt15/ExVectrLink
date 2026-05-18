@@ -6,6 +6,7 @@
 #include <Arduino.h>
 
 #include "ExVectrCore.hpp"
+#include "ExVectrCore/list_buffer.hpp"
 #include "ExVectrCore/scheduler2.hpp"
 #include "ExVectrPackets/Packets.hpp"
 #include "ExVectrPackets/radiolink/packets/RadioLinkPackets.hpp"
@@ -21,11 +22,6 @@ namespace VCTR::ExVectrLink {
  */
 class CRSFOutput : public Core::Task_Periodic {
 private:
-  enum class PendingTelemetryKind : uint8_t {
-    Battery,
-    Gps,
-  };
-
   // ── CRSF protocol constants ──
   static constexpr uint8_t CRSF_SYNC_BYTE = 0xC8;
   static constexpr uint8_t CRSF_FRAMETYPE_GPS = 0x02;
@@ -36,6 +32,8 @@ private:
   static constexpr uint16_t CRSF_CHANNEL_MID = 992;
   static constexpr uint16_t CRSF_CHANNEL_MAX = 1811;
   static constexpr uint32_t CRSF_BAUD_RATE = 420000;
+  static constexpr uint8_t TELEMETRY_QUEUE_SIZE = 4;
+  static constexpr uint16_t SERIAL_WRITE_BUFFER_SIZE = 256;
 
   // ── CRSF incoming frame parsing (for bind → upload mode) ──
   static constexpr uint8_t CRSF_FRAMETYPE_COMMAND = 0x32;
@@ -53,12 +51,11 @@ private:
   VCTR::packets::radiolink::RadioLinkPacketFilter<
       4, 4, VCTR::packets::radiolink::RadioLinkTypes::A4D4>
       packetFilter_;
-  VCTR::packets::telecoms::Telemetry_Battery pendingBatteryTelemetry_;
-  VCTR::packets::telecoms::Telemetry_GNSS pendingGpsTelemetry_;
-  bool batteryTelemetryPending_ = false;
-  bool gpsTelemetryPending_ = false;
-  PendingTelemetryKind nextPendingTelemetryKind_ =
-      PendingTelemetryKind::Battery;
+  Core::ListArray<uint8_t> pendingBatteryTelemetryData_;
+  Core::ListArray<uint8_t> pendingGpsTelemetryData_;
+  Core::ListBuffer<Core::ListArray<uint8_t>, TELEMETRY_QUEUE_SIZE>
+      telemetryQueue_;
+  Core::ListBuffer<uint8_t, SERIAL_WRITE_BUFFER_SIZE> serialWriteBuffer_;
   int64_t lastPacketTime_ = 0;
 
   bool newRcPacket = false;
@@ -75,16 +72,18 @@ private:
   static uint16_t normToCrsf(int16_t val);
 
   void packChannels(const uint16_t *channels, uint8_t *payload);
+  bool queueSerialFrame(const uint8_t *frame, size_t frameSize);
+  void flushSerialWriteBuffer();
   void writeRcChannelsFrame();
   void writeLinkStatsFrame();
-  void sendPendingTelemetry();
-  bool queueNextPendingTelemetry();
+  void queueMessages();
   void forwardBatteryTelemetry(const uint8_t *frame, uint8_t len);
   void forwardGpsTelemetry(const uint8_t *frame, uint8_t len);
 
 public:
   CRSFOutput();
   void taskInit() override;
+  void taskCheck() override;
   void taskThread() override;
 };
 

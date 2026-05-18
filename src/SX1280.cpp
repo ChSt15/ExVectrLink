@@ -109,7 +109,7 @@ void initRadioDrivers() {
 #endif
   // Core::delay(50 * Core::MILLISECONDS);
 
-  int64_t startTime = Core::NOW();
+  int64_t startTime = Core::NowNs();
   int64_t lastCheckTime = startTime;
   bool failed = false;
   while (sx1280ABusy.getPinValue()
@@ -117,8 +117,8 @@ void initRadioDrivers() {
          || sx1280BBusy.getPinValue()
 #endif
   ) {
-    lastCheckTime = Core::NOW();
-    if (Core::NOW() - startTime > 1 * Core::MILLISECONDS) {
+    lastCheckTime = Core::NowNs();
+    if (Core::NowNs() - startTime > 1 * Core::MILLISECONDS) {
       LOG_MSG("ERROR: Radios did not become ready after reset\n");
       failed = true;
       break;

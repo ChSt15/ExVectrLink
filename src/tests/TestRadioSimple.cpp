@@ -81,7 +81,7 @@ public:
       packet.payload.append(i);
     }
 
-    int secondInterval = (Core::NOW()) / Core::SECONDS;
+    int secondInterval = (Core::NowNs()) / Core::SECONDS;
 
     packet.timestamp = secondInterval * Core::SECONDS + 10 * Core::MILLISECONDS;
 

@@ -13,7 +13,7 @@ VCTR::ExVectrLink::datalink::DynamicPower &getDynamicPower() {
 }
 
 void applyDynamicPowerToRadios() {
-  const int8_t powerDbm = getDynamicPower().getPower();
+  int8_t powerDbm = getDynamicPower().getPower();
   getDatalinkRadioA().setTxPower(powerDbm);
 #if defined(HAS_DIVERSITY)
   getDatalinkRadioB().setTxPower(powerDbm);
@@ -22,7 +22,7 @@ void applyDynamicPowerToRadios() {
 
 void updateDynamicPowerFromRemoteLinkInfo(int8_t remoteRssi, int8_t remoteSnr,
                                           uint8_t remoteLq) {
-  lastReceivedLinkInfoPacketTime = Core::NOW();
+  lastReceivedLinkInfoPacketTime = Core::NowNs();
   auto &dynamicPower = getDynamicPower();
   dynamicPower.update(true, remoteRssi, remoteSnr, remoteLq);
   applyDynamicPowerToRadios();
@@ -52,12 +52,12 @@ void setupDynamicPower() {
     }
 
     if ((consecutiveLostPackets >= 2 ||
-         Core::NOW() - lastReceivedLinkInfoPacketTime >
+         Core::NowNs() - lastReceivedLinkInfoPacketTime >
              300 * Core::MILLISECONDS) &&
         getDynamicPower().isDynamicPowerEnabled()) {
-      getDynamicPower().setPower(255);
-      applyDynamicPowerToRadios();
+      getDynamicPower().incPower();
     }
+    applyDynamicPowerToRadios();
   });
 }
 

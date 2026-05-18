@@ -1,6 +1,8 @@
 #ifndef EXVECRLINK_DATALINKSETUP_HPP
 #define EXVECRLINK_DATALINKSETUP_HPP
 
+#include "Hardware.hpp"
+
 #include "ExVectrNetwork/datalink/sx1280/Sx1280_2.hpp"
 
 namespace VCTR::ExVectrLink::datalink {

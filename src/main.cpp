@@ -75,6 +75,8 @@ public:
   void taskThread() override {
     auto fhssState = VCTR::ExVectrLink::datalink::getFhss().getFhssState();
 
+    Serial.println("FHSS Sync State: " + String((int)fhssState));
+
     VCTR::ExVectrLink::packets::SerialPacket_FhssSyncState packet{
         fhssState == VCTR::ExVectrLink::datalink::FHSSState::Synced};
     serialTelecoms.sendSerialPacket(packet);
@@ -117,7 +119,7 @@ public:
 
           //   if (packet.deserialize(data.payload.getPtr())) {
           //     dataNew = true;
-          //     lastPacketTime = Core::NOW();
+          //     lastPacketTime = Core::NowNs();
           //   }
           // }
         });
@@ -127,8 +129,8 @@ public:
         [this](const VCTR::packets::radiolink::RadioLinkPacket_A4D4 &packet) {
           this->packet = packet;
           dataNew = true;
-          lastPacketTime = Core::NOW();
-          this->setDeadline(Core::NOW());
+          lastPacketTime = Core::NowNs();
+          this->setDeadline(Core::NowNs());
         });
 
     packetManager.addPacketReceiveHandler<
@@ -146,12 +148,12 @@ public:
     //           this->packet = packet;
     //           dataNew = true;
     //           packetCount++;
-    //           lastPacketTime = Core::NOW();
+    //           lastPacketTime = Core::NowNs();
     //         });
   }
 
   void taskThread() override {
-    if (Core::NOW() - lastPacketTime < Core::MILLISECONDS * 200) {
+    if (Core::NowNs() - lastPacketTime < Core::MILLISECONDS * 200) {
       bfs::SbusData sbusData;
       sbusData.lost_frame = false;
       sbusData.failsafe = false;
@@ -291,7 +293,7 @@ public:
       auto &radioB = VCTR::ExVectrLink::datalink::getDatalinkRadioB();
 #endif
 
-      auto now = Core::NOW();
+      auto now = Core::NowNs();
 
       String message =
           String() + syncState + " A: " +
@@ -451,11 +453,14 @@ void setup() {
 
   ExVectrLink::datalink::getDynamicPower().setMaxPower(
       HardwareConfig::sx1280AMaxPower);
+  ExVectrLink::datalink::getDynamicPower().setMinPower(10);
+  ExVectrLink::datalink::getDynamicPower().setDynMaxPower(20);
   ExVectrLink::datalink::getDynamicPower().setPower(20);
   ExVectrLink::datalink::setupDynamicPower();
 
 #if defined(ENABLE_SBUS) || defined(ENABLE_CRSF)
   Core::getSystemScheduler().removeTask(serialTelecoms);
+  serialTelecoms.setDisabled();
 #endif
 }
 
@@ -467,9 +472,10 @@ void processDio1Interrupts() {
     int32_t isrMicros = dio1MicrosA;
     dio1FiredA = false;
     interrupts();
-    // Reconstruct Core::NOW()-compatible timestamp by subtracting elapsed time
+    // Reconstruct Core::NowNs()-compatible timestamp by subtracting elapsed
+    // time
     int32_t elapsed = (int32_t)micros() - isrMicros;
-    int64_t timestamp = Core::NOW() - int64_t(elapsed) * Core::MICROSECONDS;
+    int64_t timestamp = Core::NowNs() - int64_t(elapsed) * Core::MICROSECONDS;
     ExVectrLink::datalink::getDatalinkRadioA().notifyDio1Irq(timestamp);
   }
 #if defined(HAS_DIVERSITY)
@@ -480,7 +486,7 @@ void processDio1Interrupts() {
     dio1FiredB = false;
     interrupts();
     int32_t elapsed = (int32_t)micros() - isrMicros;
-    int64_t timestamp = Core::NOW() - int64_t(elapsed) * Core::MICROSECONDS;
+    int64_t timestamp = Core::NowNs() - int64_t(elapsed) * Core::MICROSECONDS;
     ExVectrLink::datalink::getDatalinkRadioB().notifyDio1Irq(timestamp);
   }
 #endif

@@ -57,7 +57,7 @@ public:
 
   void taskCheck() override {
     if (!radio.isChannelBlocked()) {
-      setRelease(Core::NOW());
+      setRelease(Core::NowNs());
     }
   }
 
@@ -106,7 +106,7 @@ public:
   }
 
   void handlePacket(const VCTR::network::DataPacket &packet) {
-    auto time = Core::NOW();
+    auto time = Core::NowNs();
     auto currentPacket = packet.payload[0];
     bool packetOk = true;
     for (size_t i = 1; i < packet.payload.size(); i++) {
@@ -129,8 +129,8 @@ public:
 
   void taskThread() override {
 
-    float dTime = (Core::NOW() - lastLoopTime) / (float)Core::SECONDS;
-    lastLoopTime = Core::NOW();
+    float dTime = (Core::NowNs() - lastLoopTime) / (float)Core::SECONDS;
+    lastLoopTime = Core::NowNs();
     float throughputBytesPerSecond = totalBytesReceived / dTime;
     Serial.printf(
         "\nRadio Throughput Test Report: \nTotal Packets Received: %d, "

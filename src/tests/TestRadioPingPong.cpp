@@ -78,7 +78,7 @@ public:
     radioB.setSpreadingFactor(SX1280_SF::SF_8);
 
     radioA.addReceiveHandler([this](const VCTR::network::DataPacket &packet) {
-      auto time = Core::NOW();
+      auto time = Core::NowNs();
       auto latency = time - packetSentRadioBTime;
       packetSentRadioATime = time;
       radioA.transmitDataframe(packet);
@@ -90,11 +90,11 @@ public:
         }
       }
       addPacketLatency(latency, packetOk);
-      setRelease(Core::NOW() + 1 * Core::SECONDS);
+      setRelease(Core::NowNs() + 1 * Core::SECONDS);
     });
     // radioB.addReceiveHandler([this](const VCTR::network::DataPacket &packet)
     // {
-    //   auto time = Core::NOW();
+    //   auto time = Core::NowNs();
     //   auto latency = time - packetSentRadioATime;
     //   packetSentRadioBTime = time;
     //   radioB.transmitDataframe(packet);
@@ -106,7 +106,7 @@ public:
     //     }
     //   }
     //   addPacketLatency(latency, packetOk);
-    //   setRelease(Core::NOW() + 1 * Core::SECONDS);
+    //   setRelease(Core::NowNs() + 1 * Core::SECONDS);
     // });
   }
 
@@ -137,8 +137,8 @@ public:
   }
 
   void taskThread() override {
-    float dTime = (Core::NOW() - lastReportTime) / (float)Core::SECONDS;
-    lastReportTime = Core::NOW();
+    float dTime = (Core::NowNs() - lastReportTime) / (float)Core::SECONDS;
+    lastReportTime = Core::NowNs();
     float bytesPerSecond = radioSelfTest.totalBytesSent / dTime;
     float latencyPerPacket =
         radioSelfTest.packetCount > 0

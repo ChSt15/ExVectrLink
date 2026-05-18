@@ -17,7 +17,7 @@ namespace VCTR::ExVectrLink::datalink {
 
 VCTR::ExVectrLink::datalink::Sx1280Diversity &getSx1280Diversity() {
   static Sx1280Diversity diversity({
-      &getDatalinkRadioA(),
+      &getDatalinkRadioB(),
 #if defined(HAS_DIVERSITY)
   //&getDatalinkRadioB()
 #endif

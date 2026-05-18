@@ -17,19 +17,26 @@ namespace VCTR::ExVectrLink {
 
 using namespace VCTR::packets::radiolink;
 
+namespace {
+
+template <typename TelemetryPacket>
+void serializeTelemetryMessage(const TelemetryPacket &packet,
+                               VCTR::Core::ListArray<uint8_t> &message) {
+  const size_t packetSize = packet.numBytes();
+  message.setSize(packetSize + 1);
+  packet.serialize(message.getPtr());
+  message[packetSize] = (uint8_t)VCTR::ExVectrLink::datalink::PacketTypes::Data;
+}
+
+} // namespace
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Construction
 // ─────────────────────────────────────────────────────────────────────────────
 
 CRSFOutput::CRSFOutput()
     : Core::Task_Periodic("CRSFOutput", Core::MILLISECONDS * 10),
-      packetManager_([](const VCTR::Core::ListArray<uint8_t> &payload) {
-        network::DataPacket packet;
-        packet.payload = payload;
-        packet.payload.append((uint8_t)datalink::PacketTypes::Data);
-
-        datalink::getFhss().transmitDataframe(packet);
-      }) {
+      packetManager_([](const VCTR::Core::ListArray<uint8_t> &) {}) {
   Core::getSystemScheduler().addTask(*this);
 }
 
@@ -66,9 +73,9 @@ void CRSFOutput::taskInit() {
           [this](const VCTR::packets::radiolink::RadioLinkPacket_A4D4 &packet) {
             packet_ = packet;
             newRcPacket = true;
-            lastPacketTime_ = Core::NOW();
+            lastPacketTime_ = Core::NowNs();
             // Wake up task immediately so we output the frame ASAP
-            this->setDeadline(Core::NOW());
+            this->setDeadline(Core::NowNs());
           });
 
   packetManager_
@@ -78,11 +85,30 @@ void CRSFOutput::taskInit() {
           });
 }
 
+void CRSFOutput::taskCheck() {
+  if (serialWriteBuffer_.size() > 0) {
+    setDeadline(Core::NowNs());
+  }
+}
+
 void CRSFOutput::taskThread() {
   // Drain any incoming CRSF frames from the FC (bind command, etc.)
   processIncomingBytes();
 
-  sendPendingTelemetry();
+  if (telemetryQueue_.size() == 0) {
+    queueMessages();
+  }
+
+  if (telemetryQueue_.size() > 0 && !datalink::getFhss().isChannelBlocked()) {
+    VCTR::Core::ListArray<uint8_t> nextMessage;
+    if (telemetryQueue_.takeFront(nextMessage)) {
+      network::DataPacket packet;
+      packet.payload = nextMessage;
+      if (!datalink::getFhss().transmitDataframe(packet)) {
+        telemetryQueue_.placeFront(nextMessage);
+      }
+    }
+  }
 
   if (newRcPacket) {
     writeRcChannelsFrame();
@@ -94,45 +120,65 @@ void CRSFOutput::taskThread() {
     linkStatsCounter_ = 0;
     writeLinkStatsFrame();
   }
+
+  flushSerialWriteBuffer();
 }
 
-void CRSFOutput::sendPendingTelemetry() {
-  if (datalink::getFhss().isChannelBlocked()) {
-    return;
-  }
-
-  if (!batteryTelemetryPending_ && !gpsTelemetryPending_) {
-    return;
-  }
-
-  queueNextPendingTelemetry();
-}
-
-bool CRSFOutput::queueNextPendingTelemetry() {
-  for (uint8_t attempt = 0; attempt < 2; attempt++) {
-    const PendingTelemetryKind kind =
-        attempt == 0
-            ? nextPendingTelemetryKind_
-            : (nextPendingTelemetryKind_ == PendingTelemetryKind::Battery
-                   ? PendingTelemetryKind::Gps
-                   : PendingTelemetryKind::Battery);
-
-    if (kind == PendingTelemetryKind::Battery && batteryTelemetryPending_) {
-      packetManager_.sendPacket(pendingBatteryTelemetry_);
-      batteryTelemetryPending_ = false;
-      nextPendingTelemetryKind_ = PendingTelemetryKind::Gps;
-      return true;
-    }
-
-    if (kind == PendingTelemetryKind::Gps && gpsTelemetryPending_) {
-      packetManager_.sendPacket(pendingGpsTelemetry_);
-      gpsTelemetryPending_ = false;
-      nextPendingTelemetryKind_ = PendingTelemetryKind::Battery;
-      return true;
+void CRSFOutput::queueMessages() {
+  if (pendingBatteryTelemetryData_.size() > 0) {
+    if (telemetryQueue_.placeBack(pendingBatteryTelemetryData_)) {
+      pendingBatteryTelemetryData_.clear();
+    } else {
+      return;
     }
   }
 
-  return false;
+  if (pendingGpsTelemetryData_.size() > 0) {
+    if (telemetryQueue_.placeBack(pendingGpsTelemetryData_)) {
+      pendingGpsTelemetryData_.clear();
+    }
+  }
+}
+
+bool CRSFOutput::queueSerialFrame(const uint8_t *frame, size_t frameSize) {
+  if (frameSize > serialWriteBuffer_.sizeMax() - serialWriteBuffer_.size()) {
+    return false;
+  }
+
+  for (size_t i = 0; i < frameSize; i++) {
+    serialWriteBuffer_.placeBack(frame[i]);
+  }
+
+  return true;
+}
+
+void CRSFOutput::flushSerialWriteBuffer() {
+  if (serialWriteBuffer_.size() == 0) {
+    return;
+  }
+
+  const size_t writable = Serial.availableForWrite();
+  if (writable == 0) {
+    return;
+  }
+
+  uint8_t writeBuffer[SERIAL_WRITE_BUFFER_SIZE];
+  size_t chunkSize = serialWriteBuffer_.size();
+  if (chunkSize > writable) {
+    chunkSize = writable;
+  }
+  if (chunkSize > sizeof(writeBuffer)) {
+    chunkSize = sizeof(writeBuffer);
+  }
+
+  for (size_t i = 0; i < chunkSize; i++) {
+    writeBuffer[i] = serialWriteBuffer_[i];
+  }
+
+  const size_t bytesWritten = Serial.write(writeBuffer, chunkSize);
+  if (bytesWritten > 0) {
+    serialWriteBuffer_.removeFront(bytesWritten);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -233,7 +279,7 @@ void CRSFOutput::writeRcChannelsFrame() {
   packChannels(channels, &frame[3]);
   frame[25] = calculateCRC(&frame[2], 23); // CRC over type + payload
 
-  Serial.write(frame, 26);
+  queueSerialFrame(frame, sizeof(frame));
 }
 
 void CRSFOutput::writeLinkStatsFrame() {
@@ -299,7 +345,7 @@ void CRSFOutput::writeLinkStatsFrame() {
 
   frame[13] = calculateCRC(&frame[2], 11); // CRC over type + payload
 
-  Serial.write(frame, 14);
+  queueSerialFrame(frame, sizeof(frame));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -359,12 +405,13 @@ void CRSFOutput::forwardBatteryTelemetry(const uint8_t *frame, uint8_t len) {
   }
 
   const uint8_t *payload = &frame[3];
+  VCTR::packets::telecoms::Telemetry_Battery telemetry;
 
   // CRSF battery sensor: voltage in 100 mV units (0.1 V), current in 100 mA
   // units (0.1 A)
-  pendingBatteryTelemetry_.voltage = 0.1f * (float)readU16BE(payload);
-  pendingBatteryTelemetry_.current = 0.1f * (float)readU16BE(payload + 2);
-  batteryTelemetryPending_ = true;
+  telemetry.voltage = 0.1f * (float)readU16BE(payload);
+  telemetry.current = 0.1f * (float)readU16BE(payload + 2);
+  serializeTelemetryMessage(telemetry, pendingBatteryTelemetryData_);
 }
 
 void CRSFOutput::forwardGpsTelemetry(const uint8_t *frame, uint8_t len) {
@@ -379,13 +426,11 @@ void CRSFOutput::forwardGpsTelemetry(const uint8_t *frame, uint8_t len) {
   //  (skipped) [12..13] altitude     uint16 metres + 1000 offset [14]
   //  satellites    uint8
   const uint8_t *payload = &frame[3];
+  VCTR::packets::telecoms::Telemetry_GNSS telemetry;
 
-  pendingGpsTelemetry_.speed = readU16BE(payload + 8);
-  // Strip the CRSF +1000 m offset so altitude is metres above sea level
-  const uint16_t rawAlt = readU16BE(payload + 12);
-  // pendingGpsTelemetry_.altitude   = rawAlt > 1000 ? rawAlt - 1000 : 0;
-  pendingGpsTelemetry_.satellites = payload[14];
-  gpsTelemetryPending_ = true;
+  telemetry.speed = readU16BE(payload + 8);
+  telemetry.satellites = payload[14];
+  serializeTelemetryMessage(telemetry, pendingGpsTelemetryData_);
 }
 
 void CRSFOutput::handleCrsfFrame(const uint8_t *frame, uint8_t len) {
