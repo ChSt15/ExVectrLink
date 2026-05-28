@@ -19,7 +19,6 @@
 #include "WifiUpload.hpp"
 
 #include "DatalinkSetup.hpp"
-#include "DiversitySetup.hpp"
 #include "DynamicPowerSetup.hpp"
 #include "FhssSetup.hpp"
 
@@ -245,8 +244,6 @@ public:
     } else {
 #ifdef ENABLE_DEBUG_OUTPUT
       Serial.println("All good!");
-      uint16_t irqFlags =
-          VCTR::ExVectrLink::datalink::getDatalinkRadioA().getRemainIrqFlags();
       String irqStr;
       // if (irqFlags & IRQ_TX_DONE)
       //   irqStr += "TX_DONE ";
@@ -285,15 +282,7 @@ public:
         syncState = "Synced";
       }
 
-      auto &diversity = VCTR::ExVectrLink::datalink::getSx1280Diversity();
-      auto bestLinkIndex = diversity.getCurrentBestLinkIndex();
-      auto bestLink = diversity.getDiversityLink(bestLinkIndex);
       auto &radioA = VCTR::ExVectrLink::datalink::getDatalinkRadioA();
-#if defined(HAS_DIVERSITY)
-      auto &radioB = VCTR::ExVectrLink::datalink::getDatalinkRadioB();
-#endif
-
-      auto now = Core::NowNs();
 
       String message =
           String() + syncState + " A: " +
@@ -304,23 +293,11 @@ public:
           String((double)VCTR::ExVectrLink::datalink::getFhss()
                      .getTrueSlotInterval() /
                  Core::MICROSECONDS) +
-          " RSSI:" + bestLink->lastPacketRSSI() +
-          " SNR:" + bestLink->lastPacketSNR() + " LQ:" +
+          " RSSI:" + radioA.getPacketRSSI() + " SNR:" + radioA.getPacketSNR() +
+          " LQ:" +
           String(VCTR::ExVectrLink::datalink::getFhss().getLinkQuality() * 100,
                  0) +
-          " S:" + radioA.getState() + "|" + radioB.getState() + //
-          // " L:" +
-          // String((double)(now - radioA.getRxIdleStartTime()) /
-          //        Core::MILLISECONDS) +
-          // " L:" + (double)radioA.getLastRunTime() / Core::SECONDS //
-          " A:" + bestLinkIndex + //
-                                  // " R:" + radioA.lastPacketRSSI() //
-#if defined(HAS_DIVERSITY)
-      // + "|" + radioB.lastPacketRSSI() //
-#endif
-          +"\n";
-      // LOG_MSG(message.c_str());
-      VCTR::ExVectrLink::datalink::getDatalinkRadioA().clearRemainIrqFlags();
+          "\n";
       serialTelecoms.sendSerialPacket(VCTR::ExVectrLink::packets::Error,
                                       message.c_str(), message.length() + 1);
 #endif
@@ -413,8 +390,6 @@ void setup() {
   VCTR::ExVectrLink::datalink::getFhss().setIsRxSide(true);
 #else
   VCTR::ExVectrLink::datalink::getFhss().setIsRxSide(false);
-  VCTR::ExVectrLink::datalink::getSx1280Diversity().setDesignatedTxLink(
-      VCTR::ExVectrLink::datalink::getDatalinkRadioA());
 #endif
 
 #if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF)
@@ -432,15 +407,13 @@ void setup() {
   auto &radioB = ExVectrLink::datalink::getDatalinkRadioB();
 #endif
 
-  auto radioSetup = [](VCTR::network::datalink::Datalink_SX1280_V2 &radio) {
+  auto radioSetup = [](VCTR::network::datalink::Sx1280_Direct &radio) {
     radio.setBandwidth(VCTR::network::datalink::BW_800KHz);
     radio.setCodingRate(VCTR::network::datalink::LI_4_8);
     radio.setSpreadingFactor(VCTR::network::datalink::SF_7);
     radio.setPacketMode(VCTR::network::datalink::SX1280_PacketMode::Limited);
     radio.setFixedPacketLength(11);
-    radio.setEnableAutoRx(false);
     radio.setChannel(0);
-    radio.setEnableTxRx(true);
     radio.setTxMaxPower(HardwareConfig::sx1280AMaxPower);
     radio.setPAdbm(HardwareConfig::sx1280APAdbm);
     radio.setTxPower(20);
@@ -465,8 +438,7 @@ void setup() {
 }
 
 void processDio1Interrupts() {
-  if (dio1FiredA &&
-      ExVectrLink::datalink::getDatalinkRadioA().getInitialised()) {
+  if (dio1FiredA && ExVectrLink::datalink::getDatalinkRadioA().isConfigured()) {
     // Atomically read ISR-captured micros and clear flag
     noInterrupts();
     int32_t isrMicros = dio1MicrosA;
@@ -479,8 +451,7 @@ void processDio1Interrupts() {
     ExVectrLink::datalink::getDatalinkRadioA().notifyDio1Irq(timestamp);
   }
 #if defined(HAS_DIVERSITY)
-  if (dio1FiredB &&
-      ExVectrLink::datalink::getDatalinkRadioB().getInitialised()) {
+  if (dio1FiredB && ExVectrLink::datalink::getDatalinkRadioB().isConfigured()) {
     noInterrupts();
     int32_t isrMicros = dio1MicrosB;
     dio1FiredB = false;

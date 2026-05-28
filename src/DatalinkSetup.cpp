@@ -7,7 +7,7 @@
 
 #include "Hardware.hpp"
 
-#include "ExVectrNetwork/datalink/sx1280/Sx1280_2.hpp"
+#include "ExVectrNetwork/datalink/sx1280/Sx1280_Direct.hpp"
 
 #include "SX1280.hpp"
 
@@ -18,14 +18,14 @@ namespace VCTR::ExVectrLink::datalink {
 using namespace VCTR::ExVectrLink::radio;
 using namespace VCTR::network::datalink;
 
-VCTR::network::datalink::Datalink_SX1280_V2 &getDatalinkRadioA() {
-  static Datalink_SX1280_V2 datalinkRadioA(getRadioDriverA());
+VCTR::network::datalink::Sx1280_Direct &getDatalinkRadioA() {
+  static Sx1280_Direct datalinkRadioA(getRadioDriverA());
   return datalinkRadioA;
 }
 
 #if defined(HAS_DIVERSITY)
-VCTR::network::datalink::Datalink_SX1280_V2 &getDatalinkRadioB() {
-  static Datalink_SX1280_V2 datalinkRadioB(getRadioDriverB());
+VCTR::network::datalink::Sx1280_Direct &getDatalinkRadioB() {
+  static Sx1280_Direct datalinkRadioB(getRadioDriverB());
   return datalinkRadioB;
 }
 #endif

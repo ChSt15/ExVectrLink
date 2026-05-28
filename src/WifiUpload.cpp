@@ -115,6 +115,12 @@ public:
       });
 
       ArduinoOTA.begin();
+
+      // Enable WiFi modem sleep so the radio (and its FreeRTOS service task)
+      // only wakes at DTIM beacon intervals (~100 ms) instead of running
+      // continuously.  This prevents the WiFi task from preempting loopTask
+      // every few milliseconds and causing FHSS timing jitter.
+      WiFi.setSleep(true);
     } else if (WiFi.status() != WL_CONNECTED && !wifiStarted) {
       wifiStarted = true;
       WiFi.begin(ssid, password);
@@ -157,7 +163,16 @@ void loopWifiUpload() {
   static bool buttonPressed = false;
 
   if (wifiTimeSync.isWiFiConnected()) {
-    ArduinoOTA.handle();
+    // Rate-limit OTA polling: calling handle() on every loop() iteration
+    // acquires the lwIP core mutex and blocks for 1-5ms when the WiFi
+    // FreeRTOS task is holding it (beacon processing, ARP, etc.).
+    // Polling at 10ms intervals is plenty for OTA throughput.
+    static uint32_t lastOtaHandleMs = 0;
+    const uint32_t nowMs = millis();
+    if (nowMs - lastOtaHandleMs >= 10) {
+      lastOtaHandleMs = nowMs;
+      ArduinoOTA.handle();
+    }
   } else if (wifiTimeSync.isUploadPaused()) {
     if (digitalRead(HardwareConfig::button) == LOW) {
       if (!buttonPressed) {

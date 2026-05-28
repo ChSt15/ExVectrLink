@@ -7,7 +7,6 @@
 #include "ExVectrLink/serial/SerialTelecomPackets.hpp"
 
 #include "DatalinkSetup.hpp"
-#include "DiversitySetup.hpp"
 #include "DynamicPowerSetup.hpp"
 #include "FhssSetup.hpp"
 
@@ -138,15 +137,13 @@ public:
   }
 
   void sendLinkTelemetryPacket() {
-    auto &diversity = getSx1280Diversity();
-    auto bestLinkIndex = diversity.getCurrentBestLinkIndex();
-    auto &bestLink = *diversity.getDiversityLink(bestLinkIndex);
+    auto &radioA = getDatalinkRadioA();
     auto &dynamicPower = getDynamicPower();
 
     // --- Fill local side stats ---
-    linkInfoPacket.local.rssi = (int8_t)diversity.lastPacketRSSI();
-    linkInfoPacket.local.snr = (int8_t)diversity.lastPacketSNR();
-    linkInfoPacket.local.antenna = (uint8_t)bestLinkIndex;
+    linkInfoPacket.local.rssi = (int8_t)radioA.getPacketRSSI();
+    linkInfoPacket.local.snr = (int8_t)radioA.getPacketSNR();
+    linkInfoPacket.local.antenna = 0; // No diversity – always antenna A
     const uint8_t localLinkQuality =
         quantizeLinkQualityPercent(getFhss().getLinkQuality());
     linkInfoPacket.local.linkQuality = localLinkQuality;

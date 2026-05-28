@@ -7,7 +7,7 @@
 
 namespace VCTR::ExVectrLink::datalink {
 
-extern VCTR::ExVectrLink::datalink::FHSS &getFhss();
+VCTR::ExVectrLink::datalink::FHSS &getFhss();
 
 } // namespace VCTR::ExVectrLink::datalink
 #endif // EXVECRLINK_FHSSSETUP_HPP

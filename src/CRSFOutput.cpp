@@ -8,7 +8,7 @@
 #include "ExVectrPackets/telecoms/packets/Telemetry.hpp"
 
 #include "DatalinkCommandManager.hpp"
-#include "DiversitySetup.hpp"
+#include "DatalinkSetup.hpp"
 #include "ExVectrLink/datalink/PacketTypes.hpp"
 #include "FhssSetup.hpp"
 #include "WifiUpload.hpp"
@@ -92,14 +92,21 @@ void CRSFOutput::taskCheck() {
 }
 
 void CRSFOutput::taskThread() {
+  // Hard budget: this task must not block the scheduler for more than 500 µs
+  // so that FHSS can wake up on time.  Individual operations are normally
+  // well under that limit; the guard exists to cap any unexpected stall from
+  // USB-CDC mutex contention or similar platform overhead.
+  const int64_t budgetEnd = Core::NowNs() + 500 * Core::MICROSECONDS;
+
   // Drain any incoming CRSF frames from the FC (bind command, etc.)
   processIncomingBytes();
 
-  if (telemetryQueue_.size() == 0) {
+  if (Core::NowNs() < budgetEnd && telemetryQueue_.size() == 0) {
     queueMessages();
   }
 
-  if (telemetryQueue_.size() > 0 && !datalink::getFhss().isChannelBlocked()) {
+  if (Core::NowNs() < budgetEnd && telemetryQueue_.size() > 0 &&
+      !datalink::getFhss().isChannelBlocked()) {
     VCTR::Core::ListArray<uint8_t> nextMessage;
     if (telemetryQueue_.takeFront(nextMessage)) {
       network::DataPacket packet;
@@ -110,18 +117,22 @@ void CRSFOutput::taskThread() {
     }
   }
 
-  if (newRcPacket) {
+  if (Core::NowNs() < budgetEnd && newRcPacket) {
     writeRcChannelsFrame();
     newRcPacket = false;
   }
 
   // Send link statistics at a lower cadence (~100 ms)
-  if (++linkStatsCounter_ >= LINK_STATS_INTERVAL) {
-    linkStatsCounter_ = 0;
-    writeLinkStatsFrame();
+  if (Core::NowNs() < budgetEnd) {
+    if (++linkStatsCounter_ >= LINK_STATS_INTERVAL) {
+      linkStatsCounter_ = 0;
+      writeLinkStatsFrame();
+    }
   }
 
-  flushSerialWriteBuffer();
+  if (Core::NowNs() < budgetEnd) {
+    flushSerialWriteBuffer();
+  }
 }
 
 void CRSFOutput::queueMessages() {
@@ -162,13 +173,13 @@ void CRSFOutput::flushSerialWriteBuffer() {
     return;
   }
 
-  uint8_t writeBuffer[SERIAL_WRITE_BUFFER_SIZE];
+  uint8_t writeBuffer[SERIAL_WRITE_MAX_CHUNK];
   size_t chunkSize = serialWriteBuffer_.size();
   if (chunkSize > writable) {
     chunkSize = writable;
   }
-  if (chunkSize > sizeof(writeBuffer)) {
-    chunkSize = sizeof(writeBuffer);
+  if (chunkSize > SERIAL_WRITE_MAX_CHUNK) {
+    chunkSize = SERIAL_WRITE_MAX_CHUNK;
   }
 
   for (size_t i = 0; i < chunkSize; i++) {
@@ -283,13 +294,11 @@ void CRSFOutput::writeRcChannelsFrame() {
 }
 
 void CRSFOutput::writeLinkStatsFrame() {
-  auto &diversity = datalink::getSx1280Diversity();
-  const auto bestIdx = diversity.getCurrentBestLinkIndex();
-  const auto *bestLink = diversity.getDiversityLink(bestIdx);
+  auto &radioA = datalink::getDatalinkRadioA();
 
   // Always use local radio readings for uplink stats.
-  const int16_t rssiRaw = bestLink ? bestLink->lastPacketRSSI() : 0;
-  const int16_t snrRaw = bestLink ? bestLink->lastPacketSNR() : 0;
+  const int16_t rssiRaw = radioA.getPacketRSSI();
+  const int16_t snrRaw = radioA.getPacketSNR();
   const float lq = datalink::getFhss().getLinkQuality(); // 0.0 – 1.0
 
   const uint8_t uplinkRssi = (rssiRaw < 0) ? (uint8_t)(-rssiRaw) : (uint8_t)0;
@@ -336,7 +345,7 @@ void CRSFOutput::writeLinkStatsFrame() {
   frame[4] = 0;                       // uplink RSSI ant 2 (N/A single-ant)
   frame[5] = (uint8_t)(lq * 100.0f);  // uplink link quality 0-100 %
   frame[6] = (uint8_t)(int8_t)snrRaw; // uplink SNR (signed)
-  frame[7] = (uint8_t)bestIdx;        // active antenna index
+  frame[7] = 0;                       // active antenna index (no diversity)
   frame[8] = 4;                       // RF mode (generic)
   frame[9] = txPowerIdx;              // uplink TX power index (remote TX side)
   frame[10] = 0;                      // downlink RSSI (N/A on RX side)

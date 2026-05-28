@@ -21,24 +21,10 @@ constexpr int sx1280ATxEn = 6;
 constexpr int sx1280APAdbm = 26;
 constexpr int sx1280AMaxPower = 27;
 
-// Radio B is Vertical antenna
-constexpr int sx1280BBusy = 21;
-constexpr int sx1280BDio1 = 5;
-constexpr int sx1280BNss = 4;
-constexpr int sx1280BRst = 17;
-constexpr int sx1280BRxEn = 3;
-constexpr int sx1280BTxEn = 2;
-// constexpr int sx1280BRxEn = 2;
-// constexpr int sx1280BTxEn = 3;
-constexpr int sx1280BPAdbm = 26;
-constexpr int sx1280BMaxPower = 27;
-
 constexpr int ledRgb = -1; // Not used, set to -1
 
 constexpr int serialRx = 18;
 constexpr int serialTx = 16;
-
-#define HAS_DIVERSITY
 
 } // namespace VCTR::HardwareConfig
 

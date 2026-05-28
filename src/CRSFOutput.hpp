@@ -34,6 +34,7 @@ private:
   static constexpr uint32_t CRSF_BAUD_RATE = 420000;
   static constexpr uint8_t TELEMETRY_QUEUE_SIZE = 4;
   static constexpr uint16_t SERIAL_WRITE_BUFFER_SIZE = 256;
+  static constexpr uint8_t SERIAL_WRITE_MAX_CHUNK = 32;
 
   // ── CRSF incoming frame parsing (for bind → upload mode) ──
   static constexpr uint8_t CRSF_FRAMETYPE_COMMAND = 0x32;
