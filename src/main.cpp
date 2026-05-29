@@ -308,10 +308,10 @@ ErrorSender errorSender;
 #endif
 
 // ISR-captured state for DIO1 interrupt timestamps
-volatile int32_t dio1MicrosA = 0;
+volatile uint32_t dio1MicrosA = 0;
 volatile bool dio1FiredA = false;
 #if defined(HAS_DIVERSITY)
-volatile int32_t dio1MicrosB = 0;
+volatile uint32_t dio1MicrosB = 0;
 volatile bool dio1FiredB = false;
 #endif
 
@@ -441,23 +441,25 @@ void processDio1Interrupts() {
   if (dio1FiredA && ExVectrLink::datalink::getDatalinkRadioA().isConfigured()) {
     // Atomically read ISR-captured micros and clear flag
     noInterrupts();
-    int32_t isrMicros = dio1MicrosA;
+    uint32_t isrMicros = dio1MicrosA;
     dio1FiredA = false;
     interrupts();
-    // Reconstruct Core::NowNs()-compatible timestamp by subtracting elapsed
-    // time
-    int32_t elapsed = (int32_t)micros() - isrMicros;
-    int64_t timestamp = Core::NowNs() - int64_t(elapsed) * Core::MICROSECONDS;
+    // Unsigned subtraction keeps the elapsed time correct even when micros()
+    // wraps roughly every 71 minutes.
+    uint32_t elapsedMicros = micros() - isrMicros;
+    int64_t timestamp =
+        Core::NowNs() - int64_t(elapsedMicros) * Core::MICROSECONDS;
     ExVectrLink::datalink::getDatalinkRadioA().notifyDio1Irq(timestamp);
   }
 #if defined(HAS_DIVERSITY)
   if (dio1FiredB && ExVectrLink::datalink::getDatalinkRadioB().isConfigured()) {
     noInterrupts();
-    int32_t isrMicros = dio1MicrosB;
+    uint32_t isrMicros = dio1MicrosB;
     dio1FiredB = false;
     interrupts();
-    int32_t elapsed = (int32_t)micros() - isrMicros;
-    int64_t timestamp = Core::NowNs() - int64_t(elapsed) * Core::MICROSECONDS;
+    uint32_t elapsedMicros = micros() - isrMicros;
+    int64_t timestamp =
+        Core::NowNs() - int64_t(elapsedMicros) * Core::MICROSECONDS;
     ExVectrLink::datalink::getDatalinkRadioB().notifyDio1Irq(timestamp);
   }
 #endif

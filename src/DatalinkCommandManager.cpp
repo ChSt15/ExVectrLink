@@ -7,6 +7,7 @@
 #include "ExVectrLink/serial/SerialTelecomPackets.hpp"
 
 #include "DatalinkSetup.hpp"
+#include "DiversitySetup.hpp"
 #include "DynamicPowerSetup.hpp"
 #include "FhssSetup.hpp"
 
@@ -112,6 +113,14 @@ static void decodeRxState(const uint8_t in[8], uint32_t &deviceTime,
   desyncCount = (uint16_t)in[4] | ((uint16_t)in[5] << 8);
 }
 
+static uint8_t getLocalTxAntennaIndex() {
+#if defined(HAS_DIVERSITY)
+  return (uint8_t)getSx1280Diversity().getCurrentTxLinkIndex();
+#else
+  return 0;
+#endif
+}
+
 class LinkInfoSender : public VCTR::Core::Task_Periodic {
 
   int64_t lastRxStatePacketSendTime = 0;
@@ -143,7 +152,7 @@ public:
     // --- Fill local side stats ---
     linkInfoPacket.local.rssi = (int8_t)radioA.getPacketRSSI();
     linkInfoPacket.local.snr = (int8_t)radioA.getPacketSNR();
-    linkInfoPacket.local.antenna = 0; // No diversity – always antenna A
+    linkInfoPacket.local.antenna = getLocalTxAntennaIndex();
     const uint8_t localLinkQuality =
         quantizeLinkQualityPercent(getFhss().getLinkQuality());
     linkInfoPacket.local.linkQuality = localLinkQuality;

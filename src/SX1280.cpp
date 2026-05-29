@@ -23,7 +23,7 @@ Platform::PinGPIO sx1280ABusy(HardwareConfig::sx1280ABusy);
 Platform::PinGPIO sx1280ARxEn(HardwareConfig::sx1280ARxEn);
 Platform::PinGPIO sx1280ATxEn(HardwareConfig::sx1280ATxEn);
 
-#if defined(HAS_DIVERSITY)
+#if defined(HAS_DIVERSITY) || defined(HAS_RADIO_B_HARDWARE)
 Platform::PinGPIO sx1280BNss(HardwareConfig::sx1280BNss);
 Platform::PinGPIO sx1280BRst(HardwareConfig::sx1280BRst);
 Platform::PinGPIO sx1280BDio1(HardwareConfig::sx1280BDio1);
@@ -67,7 +67,7 @@ void initRadioDrivers() {
   sx1280ARxEn.init(HAL::GPIO_IOMODE_t::IOMODE_OUTPUT);
   sx1280ATxEn.init(HAL::GPIO_IOMODE_t::IOMODE_OUTPUT);
 
-#if defined(HAS_DIVERSITY)
+#if defined(HAS_DIVERSITY) || defined(HAS_RADIO_B_HARDWARE)
   sx1280BNss.init(HAL::GPIO_IOMODE_t::IOMODE_OUTPUT);
   sx1280BRst.init(HAL::GPIO_IOMODE_t::IOMODE_OUTPUT);
   sx1280BDio1.init(HAL::GPIO_IOMODE_t::IOMODE_INPUT);
@@ -81,7 +81,7 @@ void initRadioDrivers() {
   sx1280ARxEn.setPinValue(LOW);
   sx1280ATxEn.setPinValue(LOW);
 
-#if defined(HAS_DIVERSITY)
+#if defined(HAS_DIVERSITY) || defined(HAS_RADIO_B_HARDWARE)
   sx1280BNss.setPinValue(HIGH);
   sx1280BRst.setPinValue(HIGH);
   sx1280BRxEn.setPinValue(LOW);
@@ -98,13 +98,13 @@ void initRadioDrivers() {
   // Some SuperD boards appear to have reset coupling, so avoid driving
   // opposite levels on RST_A and RST_B.
   sx1280ARst.setPinValue(LOW);
-#if defined(HAS_DIVERSITY)
+#if defined(HAS_DIVERSITY) || defined(HAS_RADIO_B_HARDWARE)
   sx1280BRst.setPinValue(LOW);
 #endif
   Core::delay(50 * Core::MILLISECONDS);
 
   sx1280ARst.setPinValue(HIGH);
-#if defined(HAS_DIVERSITY)
+#if defined(HAS_DIVERSITY) || defined(HAS_RADIO_B_HARDWARE)
   sx1280BRst.setPinValue(HIGH);
 #endif
   // Core::delay(50 * Core::MILLISECONDS);
