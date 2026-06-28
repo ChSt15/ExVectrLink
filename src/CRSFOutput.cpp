@@ -9,6 +9,7 @@
 
 #include "DatalinkCommandManager.hpp"
 #include "DatalinkSetup.hpp"
+#include "DiversitySetup.hpp"
 #include "ExVectrLink/datalink/PacketTypes.hpp"
 #include "FhssSetup.hpp"
 #include "WifiUpload.hpp"
@@ -19,6 +20,14 @@ using namespace VCTR::packets::radiolink;
 
 namespace {
 
+const VCTR::network::datalink::Sx1280_DirectI &getLinkStatsRadio() {
+#if defined(HAS_DIVERSITY)
+  return VCTR::ExVectrLink::datalink::getSx1280Diversity();
+#else
+  return VCTR::ExVectrLink::datalink::getDatalinkRadioA();
+#endif
+}
+
 template <typename TelemetryPacket>
 void serializeTelemetryMessage(const TelemetryPacket &packet,
                                VCTR::Core::ListArray<uint8_t> &message) {
@@ -28,7 +37,45 @@ void serializeTelemetryMessage(const TelemetryPacket &packet,
   message[packetSize] = (uint8_t)VCTR::ExVectrLink::datalink::PacketTypes::Data;
 }
 
+uint16_t rcPacketRateHz = 0;
+uint16_t rcPacketsThisWindow = 0;
+uint16_t crsfTxFailureRateHz = 0;
+uint16_t crsfTxFailuresThisWindow = 0;
+int64_t crsfStatsWindowStartNs = 0;
+
+void updateCrsfStatsWindow(int64_t nowNs) {
+  if (crsfStatsWindowStartNs == 0) {
+    crsfStatsWindowStartNs = nowNs;
+    return;
+  }
+
+  while (nowNs - crsfStatsWindowStartNs >= Core::SECONDS) {
+    rcPacketRateHz = rcPacketsThisWindow;
+    rcPacketsThisWindow = 0;
+    crsfTxFailureRateHz = crsfTxFailuresThisWindow;
+    crsfTxFailuresThisWindow = 0;
+    crsfStatsWindowStartNs += Core::SECONDS;
+  }
+}
+
+void noteRcPacketReceived(int64_t nowNs) {
+  updateCrsfStatsWindow(nowNs);
+  if (rcPacketsThisWindow < 0xFFFFu) {
+    rcPacketsThisWindow++;
+  }
+}
+
+void noteCrsfTxFailure(int64_t nowNs) {
+  updateCrsfStatsWindow(nowNs);
+  if (crsfTxFailuresThisWindow < 0xFFFFu) {
+    crsfTxFailuresThisWindow++;
+  }
+}
+
 } // namespace
+
+uint16_t getCrsfRcPacketRateHz() { return rcPacketRateHz; }
+uint16_t getCrsfTxFailureRateHz() { return crsfTxFailureRateHz; }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Construction
@@ -71,11 +118,13 @@ void CRSFOutput::taskInit() {
   packetManager_
       .addPacketReceiveHandler<VCTR::packets::radiolink::RadioLinkPacket_A4D4>(
           [this](const VCTR::packets::radiolink::RadioLinkPacket_A4D4 &packet) {
+            const int64_t nowNs = Core::NowNs();
             packet_ = packet;
             newRcPacket = true;
-            lastPacketTime_ = Core::NowNs();
+            lastPacketTime_ = nowNs;
+            noteRcPacketReceived(nowNs);
             // Wake up task immediately so we output the frame ASAP
-            this->setDeadline(Core::NowNs());
+            this->setDeadline(nowNs);
           });
 
   packetManager_
@@ -92,11 +141,14 @@ void CRSFOutput::taskCheck() {
 }
 
 void CRSFOutput::taskThread() {
+  const int64_t nowNs = Core::NowNs();
+  updateCrsfStatsWindow(nowNs);
+
   // Hard budget: this task must not block the scheduler for more than 500 µs
   // so that FHSS can wake up on time.  Individual operations are normally
   // well under that limit; the guard exists to cap any unexpected stall from
   // USB-CDC mutex contention or similar platform overhead.
-  const int64_t budgetEnd = Core::NowNs() + 500 * Core::MICROSECONDS;
+  const int64_t budgetEnd = nowNs + 500 * Core::MICROSECONDS;
 
   // Drain any incoming CRSF frames from the FC (bind command, etc.)
   processIncomingBytes();
@@ -153,6 +205,7 @@ void CRSFOutput::queueMessages() {
 
 bool CRSFOutput::queueSerialFrame(const uint8_t *frame, size_t frameSize) {
   if (frameSize > serialWriteBuffer_.sizeMax() - serialWriteBuffer_.size()) {
+    noteCrsfTxFailure(Core::NowNs());
     return false;
   }
 
@@ -294,12 +347,13 @@ void CRSFOutput::writeRcChannelsFrame() {
 }
 
 void CRSFOutput::writeLinkStatsFrame() {
-  auto &radioA = datalink::getDatalinkRadioA();
+  const auto &radio = getLinkStatsRadio();
 
   // Always use local radio readings for uplink stats.
-  const int16_t rssiRaw = radioA.getPacketRSSI();
-  const int16_t snrRaw = radioA.getPacketSNR();
-  const float lq = datalink::getFhss().getLinkQuality(); // 0.0 – 1.0
+  const int16_t rssiRaw = radio.getPacketRSSI();
+  const int16_t snrRaw = radio.getPacketSNR();
+  const float lq = datalink::getFhss().getLinkQuality();        // 0.0 – 1.0
+  const float packetQ = datalink::getFhss().getPacketQuality(); // 0.0 – 1.0
 
   const uint8_t uplinkRssi = (rssiRaw < 0) ? (uint8_t)(-rssiRaw) : (uint8_t)0;
 
@@ -349,8 +403,8 @@ void CRSFOutput::writeLinkStatsFrame() {
   frame[8] = 4;                       // RF mode (generic)
   frame[9] = txPowerIdx;              // uplink TX power index (remote TX side)
   frame[10] = 0;                      // downlink RSSI (N/A on RX side)
-  frame[11] = 0;                      // downlink link quality (N/A on RX side)
-  frame[12] = 0;                      // downlink SNR (N/A on RX side)
+  frame[11] = (uint8_t)(packetQ * 100.0f); // repurpose unused downlink LQ
+  frame[12] = 0;                           // downlink SNR (N/A on RX side)
 
   frame[13] = calculateCRC(&frame[2], 11); // CRC over type + payload
 

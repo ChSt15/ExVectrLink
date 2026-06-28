@@ -11,6 +11,10 @@
 #include "DynamicPowerSetup.hpp"
 #include "FhssSetup.hpp"
 
+#if defined(ENABLE_CRSF)
+#include "CRSFOutput.hpp"
+#endif
+
 #include "DatalinkCommandManager.hpp"
 
 namespace VCTR::ExVectrLink::datalink {
@@ -19,13 +23,45 @@ using namespace VCTR::ExVectrLink::packets;
 
 uint8_t packetNumber = 0;
 
-int64_t rxDeviceTime = 0;
 int32_t rxDesyncCount = 0;
+uint16_t rxPacketRateHz = 0;
+uint8_t rxPacketQuality = 0;
+uint16_t rxCrsfTxFailures = 0;
 
 /// Decoded far-end link stats from the last received OTA LinkInfo packet.
 static RemoteLinkStats remoteStats;
 
 const RemoteLinkStats &getRemoteLinkStats() { return remoteStats; }
+
+static uint8_t quantizeLinkQualityPercent(float lq);
+
+static uint16_t getLocalRcPacketRateHz() {
+#if defined(ENABLE_CRSF)
+  return VCTR::ExVectrLink::getCrsfRcPacketRateHz();
+#else
+  return 0;
+#endif
+}
+
+static uint8_t getLocalPacketQualityPercent() {
+  return quantizeLinkQualityPercent(getFhss().getPacketQuality());
+}
+
+static uint16_t getLocalCrsfTxFailureRateHz() {
+#if defined(ENABLE_CRSF)
+  return VCTR::ExVectrLink::getCrsfTxFailureRateHz();
+#else
+  return 0;
+#endif
+}
+
+static const VCTR::network::datalink::Sx1280_DirectI &getLinkStatsRadio() {
+#if defined(HAS_DIVERSITY)
+  return getSx1280Diversity();
+#else
+  return getDatalinkRadioA();
+#endif
+}
 
 int8_t getLocalTxPowerdBm() { return getDatalinkRadioA().getTxPower(); }
 
@@ -96,21 +132,26 @@ static void decodeLinkInfo(const uint8_t in[5], uint8_t &antenna, float &lq,
   dynamicPower = (in[4] & 0x01) != 0;
 }
 
-static void encodeRxState(uint32_t deviceTime, uint16_t desyncCount,
+static void encodeRxState(uint16_t desyncCount, uint16_t packetRateHz,
+                          uint8_t packetQuality, uint16_t crsfTxFailures,
                           uint8_t out[8]) {
-  int32_t time = (int32_t)(deviceTime & 0xFFFFFFFF);
-  memcpy(out, &time, 4);
-  out[4] = (uint8_t)(desyncCount & 0xFF);
-  out[5] = (uint8_t)((desyncCount >> 8) & 0xFF);
-  // Remaining bytes are spare.
+  out[0] = (uint8_t)(desyncCount & 0xFF);
+  out[1] = (uint8_t)((desyncCount >> 8) & 0xFF);
+  out[2] = (uint8_t)(packetRateHz & 0xFF);
+  out[3] = (uint8_t)((packetRateHz >> 8) & 0xFF);
+  out[4] = packetQuality;
+  out[5] = (uint8_t)(crsfTxFailures & 0xFF);
+  out[6] = (uint8_t)((crsfTxFailures >> 8) & 0xFF);
+  out[7] = 0;
 }
 
-static void decodeRxState(const uint8_t in[8], uint32_t &deviceTime,
-                          uint16_t &desyncCount) {
-  int32_t time;
-  memcpy(&time, in, 4);
-  deviceTime = (uint32_t)time;
-  desyncCount = (uint16_t)in[4] | ((uint16_t)in[5] << 8);
+static void decodeRxState(const uint8_t in[8], uint16_t &desyncCount,
+                          uint16_t &packetRateHz, uint8_t &packetQuality,
+                          uint16_t &crsfTxFailures) {
+  desyncCount = (uint16_t)in[0] | ((uint16_t)in[1] << 8);
+  packetRateHz = (uint16_t)in[2] | ((uint16_t)in[3] << 8);
+  packetQuality = in[4];
+  crsfTxFailures = (uint16_t)in[5] | ((uint16_t)in[6] << 8);
 }
 
 static uint8_t getLocalTxAntennaIndex() {
@@ -146,22 +187,24 @@ public:
   }
 
   void sendLinkTelemetryPacket() {
-    auto &radioA = getDatalinkRadioA();
+    const auto &radio = getLinkStatsRadio();
     auto &dynamicPower = getDynamicPower();
 
     // --- Fill local side stats ---
-    linkInfoPacket.local.rssi = (int8_t)radioA.getPacketRSSI();
-    linkInfoPacket.local.snr = (int8_t)radioA.getPacketSNR();
+    linkInfoPacket.local.rssi = (int8_t)radio.getPacketRSSI();
+    linkInfoPacket.local.snr = (int8_t)radio.getPacketSNR();
     linkInfoPacket.local.antenna = getLocalTxAntennaIndex();
     const uint8_t localLinkQuality =
         quantizeLinkQualityPercent(getFhss().getLinkQuality());
     linkInfoPacket.local.linkQuality = localLinkQuality;
     linkInfoPacket.local.lossRate = (uint8_t)(100 - localLinkQuality);
+    linkInfoPacket.local.packetQuality = getLocalPacketQualityPercent();
     const int8_t localTxPowerdBm = getLocalTxPowerdBm();
     linkInfoPacket.local.txPower = localTxPowerdBm;
     linkInfoPacket.local.dynamicPower = dynamicPower.isDynamicPowerEnabled();
-    linkInfoPacket.local.deviceTime = (int32_t)(Core::NowNs() / Core::SECONDS);
     linkInfoPacket.local.desyncCount = getFhss().getDesyncCounter();
+    linkInfoPacket.local.packetRate = getLocalRcPacketRateHz();
+    linkInfoPacket.local.crsfTxFailures = getLocalCrsfTxFailureRateHz();
 
     // --- Fill remote side stats (from last received OTA LinkTelemetry) ---
     linkInfoPacket.remote.rssi = remoteStats.rssi;
@@ -169,16 +212,19 @@ public:
     linkInfoPacket.remote.antenna = remoteStats.antenna;
     linkInfoPacket.remote.linkQuality = remoteStats.linkQuality;
     linkInfoPacket.remote.lossRate = (uint8_t)(100 - remoteStats.linkQuality);
+    linkInfoPacket.remote.packetQuality = rxPacketQuality;
     linkInfoPacket.remote.txPower = remoteStats.txPowerdBm;
     linkInfoPacket.remote.dynamicPower = remoteStats.dynamicPower;
-    linkInfoPacket.remote.deviceTime = rxDeviceTime;
     linkInfoPacket.remote.desyncCount = rxDesyncCount;
+    linkInfoPacket.remote.packetRate = rxPacketRateHz;
+    linkInfoPacket.remote.crsfTxFailures = rxCrsfTxFailures;
 
     linkInfoPacket.remoteValid = remoteStats.valid;
 
     if (getFhss().getFhssState() != FHSSState::Synced) {
       // If not synced, override link quality to 0 and mark remote as invalid.
       linkInfoPacket.remote.linkQuality = 0;
+      linkInfoPacket.remote.packetQuality = 0;
       linkInfoPacket.remoteValid = false;
     }
 
@@ -203,7 +249,9 @@ public:
   void sendRxStatePacket() {
 
     uint8_t payload[8];
-    encodeRxState(rxDeviceTime, getFhss().getDesyncCounter(), payload);
+    encodeRxState(getFhss().getDesyncCounter(), getLocalRcPacketRateHz(),
+                  getLocalPacketQualityPercent(), getLocalCrsfTxFailureRateHz(),
+                  payload);
 
     network::DataPacket otaPkt;
     for (size_t i = 0; i < 8; i++) {
@@ -345,16 +393,20 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
 
     } else if (pktType == (uint8_t)PacketTypes::RxState) {
 
-      // Decode the 8-byte OTA RxState packet which contains the far end's
-      // device time and FHSS desync count. This is used for debugging and to
-      // trigger more frequent RxState packets from the far end if we detect
-      // they are out of sync.
-      uint32_t remDeviceTime;
+      // Decode the 8-byte OTA RxState packet which carries the far end's
+      // desync count plus rate/quality diagnostics that do not fit in the
+      // compact LinkTelemetry packet.
       uint16_t remDesyncCount;
-      decodeRxState(packet.payload.getPtr(), remDeviceTime, remDesyncCount);
+      uint16_t remPacketRateHz;
+      uint8_t remPacketQuality;
+      uint16_t remCrsfTxFailures;
+      decodeRxState(packet.payload.getPtr(), remDesyncCount, remPacketRateHz,
+                    remPacketQuality, remCrsfTxFailures);
 
-      rxDeviceTime = remDeviceTime;
       rxDesyncCount = remDesyncCount;
+      rxPacketRateHz = remPacketRateHz;
+      rxPacketQuality = remPacketQuality;
+      rxCrsfTxFailures = remCrsfTxFailures;
     }
     // Other types are silently ignored for now.
   });
