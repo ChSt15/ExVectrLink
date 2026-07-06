@@ -60,6 +60,7 @@ public:
   explicit CRSFRcOutput(HardwareSerial &serial);
 
   void taskInit() override;
+  void taskCheck() override;
   void taskThread() override;
 };
 

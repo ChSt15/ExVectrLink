@@ -34,5 +34,16 @@ const RemoteLinkStats &getRemoteLinkStats();
 /// different OTA packet type (RxState vs LinkTelemetry).
 uint8_t getRemotePacketQuality();
 
+/// Returns the far end's CRSF TX-failure rate (frames/s that couldn't be
+/// written to its flight controller because the send buffer was full),
+/// from the OTA RxState packet. On the RX side this is 0 when CRSF frames
+/// are flowing to the FC and climbs when the FC UART never accepts bytes.
+uint16_t getRemoteCrsfTxFailureRateHz();
+
+/// Returns the far end's RC packet rate (RC frames/s it received over the
+/// radio and fed to its CRSF output), from the OTA RxState packet. >0
+/// confirms the RX is decoding RC and building CRSF frames at all.
+uint16_t getRemoteRcPacketRateHz();
+
 } // namespace VCTR::ExVectrLink::datalink
 #endif // EXVECRLINK_DATALINKCOMMANDMANAGER_HPP

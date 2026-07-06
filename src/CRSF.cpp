@@ -131,27 +131,34 @@ bool CRSF::writeFrame(const uint8_t *frame, size_t len) {
 }
 
 void CRSF::flushTx() {
-  if (txBuffer_.size() == 0) {
-    return;
-  }
-  const size_t writable = portWritable();
-  if (writable == 0) {
-    return;
-  }
-
+  // Drain the outgoing buffer to the UART, but never hand portWrite() more
+  // than the port can currently accept -- serial_.write() only blocks if
+  // asked to write past availableForWrite(), so bounding every chunk by it
+  // keeps this strictly non-blocking. Loop so a whole frame goes out in a
+  // single call whenever there is room (rather than one IO_CHUNK_SIZE slice
+  // per call); the loop is naturally bounded because each write shrinks the
+  // port's free space until it hits 0, or the buffer empties. Same approach
+  // as SerialTelecoms::taskThread()'s writeData().
   uint8_t buf[IO_CHUNK_SIZE];
-  size_t chunk = txBuffer_.size();
-  if (chunk > writable) {
-    chunk = writable;
-  }
-  if (chunk > sizeof(buf)) {
-    chunk = sizeof(buf);
-  }
-  for (size_t i = 0; i < chunk; i++) {
-    buf[i] = txBuffer_[i];
-  }
-  const size_t written = portWrite(buf, chunk);
-  if (written > 0) {
+  while (txBuffer_.size() > 0) {
+    const size_t writable = portWritable();
+    if (writable == 0) {
+      break; // No room right now; the remainder flushes on the next call.
+    }
+    size_t chunk = txBuffer_.size();
+    if (chunk > writable) {
+      chunk = writable;
+    }
+    if (chunk > sizeof(buf)) {
+      chunk = sizeof(buf);
+    }
+    for (size_t i = 0; i < chunk; i++) {
+      buf[i] = txBuffer_[i];
+    }
+    const size_t written = portWrite(buf, chunk);
+    if (written == 0) {
+      break; // Defensive: don't spin if the port accepted nothing.
+    }
     txBuffer_.removeFront(written);
   }
 }

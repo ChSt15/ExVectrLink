@@ -35,6 +35,10 @@ const RemoteLinkStats &getRemoteLinkStats() { return remoteStats; }
 
 uint8_t getRemotePacketQuality() { return rxPacketQuality; }
 
+uint16_t getRemoteCrsfTxFailureRateHz() { return rxCrsfTxFailures; }
+
+uint16_t getRemoteRcPacketRateHz() { return rxPacketRateHz; }
+
 static uint8_t quantizeLinkQualityPercent(float lq);
 
 static uint16_t getLocalRcPacketRateHz() {

@@ -92,6 +92,12 @@ public:
   /// none has been sent yet.
   int64_t getLastSendTime() const { return lastSendTime_; }
 
+  /// @returns the number of buffered outgoing bytes not yet accepted by the
+  /// port (>0 means a later flush -- e.g. via available() -- still has work
+  /// to do because the port was full). Useful for waking a task early to
+  /// drain the backlog, the way SerialTelecoms does.
+  size_t pendingTxBytes() const { return txBuffer_.size(); }
+
   // ── RX ──
 
   /**

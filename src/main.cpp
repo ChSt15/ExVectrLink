@@ -239,7 +239,6 @@ VCTR::ExVectrLink::CRSFRcInput crsfRcInput(linkSerialPort,
                                            true);
 #endif
 
-#if defined(ENABLE_CRSF)
 /**
  * @brief Failsafe recovery for the RX (flight-controller-facing) side: if
  * the radio never gets past FHSSState::Searching within 60 s of boot, drop
@@ -287,7 +286,6 @@ public:
   }
 };
 SyncFailsafeMonitor syncFailsafeMonitor;
-#endif
 
 // SBUS and CRSF (output) both hijack the USB `Serial` port for their own
 // protocol framing, so debug printing is only safe when neither is active
@@ -341,30 +339,44 @@ public:
     // physical side (RX or TX module) this firmware is running on, these
     // two lines together cover both ends of the link.
     const auto &remote = ExVectrLink::datalink::getRemoteLinkStats();
-    Serial.printf(
-        "             Local  LQ:%3.0f%% PQ:%3.0f%% RSSI:%4d SNR:%3d TXpwr:%3d dBm\n",
-        (double)(fhss.getLinkQuality() * 100.0f),
-        (double)(fhss.getPacketQuality() * 100.0f), radioA.getPacketRSSI(),
-        radioA.getPacketSNR(), ExVectrLink::datalink::getLocalTxPowerdBm());
-    Serial.printf(
-        "             Remote LQ:%3d%% PQ:%3d%% RSSI:%4d SNR:%3d TXpwr:%3d dBm%s\n",
-        remote.linkQuality, ExVectrLink::datalink::getRemotePacketQuality(),
-        remote.rssi, remote.snr, remote.txPowerdBm,
-        remote.valid ? "" : " (no data yet)");
+    Serial.printf("             Local  LQ:%3.0f%% PQ:%3.0f%% RSSI:%4d SNR:%3d "
+                  "TXpwr:%3d dBm\n",
+                  (double)(fhss.getLinkQuality() * 100.0f),
+                  (double)(fhss.getPacketQuality() * 100.0f),
+                  radioA.getPacketRSSI(), radioA.getPacketSNR(),
+                  ExVectrLink::datalink::getLocalTxPowerdBm());
+    Serial.printf("             Remote LQ:%3d%% PQ:%3d%% RSSI:%4d SNR:%3d "
+                  "TXpwr:%3d dBm%s\n",
+                  remote.linkQuality,
+                  ExVectrLink::datalink::getRemotePacketQuality(), remote.rssi,
+                  remote.snr, remote.txPowerdBm,
+                  remote.valid ? "" : " (no data yet)");
+    // Remote (RX-side) CRSF -> flight controller health.
+    //  RC rate  >0  => RX is decoding RC and building CRSF frames.
+    //  fail rate 0  => those frames are being written to the FC UART OK
+    //                  (so if the FC still sees nothing, look past the RX's
+    //                  UART: wiring / baud / inversion / FC CRSF config).
+    //  fail rate >0 => RX builds frames but the FC serial port won't accept
+    //                  the bytes (buffer full / port not draining).
+    Serial.printf("             Remote CRSF: RC rate %u /s | CRSF->FC fail "
+                  "rate %u /s\n",
+                  ExVectrLink::datalink::getRemoteRcPacketRateHz(),
+                  ExVectrLink::datalink::getRemoteCrsfTxFailureRateHz());
 
 #if defined(ENABLE_CRSF_INPUT)
     const auto &rc = crsfRcInput.getLastRcPacket();
     const uint32_t rcFrameCount = crsfRcInput.getRcFrameCount();
     const uint32_t rcRate = rcFrameCount - lastRcFrameCount_;
     lastRcFrameCount_ = rcFrameCount;
-    const bool rcReceiving = (Core::NowNs() - crsfRcInput.getLastRcPacketTime()) <
-                             300 * Core::MILLISECONDS;
+    const bool rcReceiving =
+        (Core::NowNs() - crsfRcInput.getLastRcPacketTime()) <
+        300 * Core::MILLISECONDS;
 
-    Serial.printf(
-        "             CRSF CH1:%5d CH2:%5d CH3:%5d CH4:%5d | Rate:%lu Hz | %s\n",
-        rc.analogChannels[0], rc.analogChannels[1], rc.analogChannels[2],
-        rc.analogChannels[3], (unsigned long)rcRate,
-        rcReceiving ? "RX OK" : "NO SIGNAL");
+    Serial.printf("             CRSF CH1:%5d CH2:%5d CH3:%5d CH4:%5d | "
+                  "Rate:%lu Hz | %s\n",
+                  rc.analogChannels[0], rc.analogChannels[1],
+                  rc.analogChannels[2], rc.analogChannels[3],
+                  (unsigned long)rcRate, rcReceiving ? "RX OK" : "NO SIGNAL");
 #endif
   }
 };
