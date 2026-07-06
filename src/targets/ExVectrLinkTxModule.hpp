@@ -17,7 +17,7 @@ constexpr int sx1280ARst = 7;
 constexpr int sx1280ARxEn = 15;
 constexpr int sx1280ATxEn = 16;
 constexpr int sx1280APAdbm = 26;
-constexpr int sx1280AMaxPower = 27;
+constexpr int sx1280AMaxPower = 10;
 
 // Radio B is still physically populated on the controller board. Keep its
 // pins in a safe state so it does not interfere with Radio A, but do not use
@@ -35,11 +35,17 @@ constexpr int sx1280AMaxPower = 27;
 
 // constexpr int ledRgb = -1; // Not used, set to -1
 
-constexpr int i2cSda = 38;
-constexpr int i2cScl = 37;
+// constexpr int i2cSda = 38;
+// constexpr int i2cScl = 37;
 
-constexpr int serialRx = 36;
-constexpr int serialTx = 35;
+// The RadioMaster Pocket's "nano" external module bay exposes CRSF as a
+// single, half-duplex signal wire (S.Port style) rather than separate RX/TX
+// lines. Both must therefore point at the SAME physical pin -- CRSFInput
+// puts the UART into RS485 half-duplex mode when rxPin == txPin so the pad
+// only drives the bus while actually transmitting telemetry, and otherwise
+// stays high-impedance so it does not fight the handset's driver.
+constexpr int serialRx = 12;
+constexpr int serialTx = 12;
 
 } // namespace VCTR::HardwareConfig
 

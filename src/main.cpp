@@ -28,6 +28,10 @@
 #include "CRSFOutput.hpp"
 #endif
 
+#if defined(ENABLE_CRSF_INPUT)
+#include "CRSFInput.hpp"
+#endif
+
 using namespace VCTR;
 using namespace VCTR::ExVectrLink;
 
@@ -57,7 +61,8 @@ public:
 TempMonitor tempMonitor;
 #endif
 
-#if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF)
+#if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF) &&                          \
+    !defined(ENABLE_CRSF_INPUT)
 class SyncedMonitor : public Core::Task_Periodic {
 private:
   VCTR::ExVectrLink::datalink::FHSSState lastState =
@@ -214,9 +219,117 @@ SBusTx sbusTx;
 } // namespace VCTR::ExVectrLink
 #elif defined(ENABLE_CRSF)
 VCTR::ExVectrLink::CRSFOutput crsfOutput;
+#elif defined(ENABLE_CRSF_INPUT)
+// 400000 baud matches the handset's external-module CRSF baud rate setting
+// (OpenTX/EdgeTX's "CRSF" module type default). This MUST match whatever
+// baud rate is configured in the radio's module settings, or every frame
+// will fail CRC checks.
+//
+// invert=true: getting a handful of CRC-passing good frames (not just
+// resync failures) during connector insertion transients is strong
+// evidence this polarity is correct -- a wrong polarity would essentially
+// never produce a CRC match by chance. The "goes silent once fully seated"
+// symptom looks like a physical/mechanical connection problem rather than
+// a polarity one -- see notes at the CRSFInput instantiation site.
+VCTR::ExVectrLink::CRSFInput crsfInput(linkSerialPort, HardwareConfig::serialRx,
+                                       HardwareConfig::serialTx, 400000, true);
 #endif
 
+// SBUS and CRSF (output) both hijack the USB `Serial` port for their own
+// protocol framing, so debug printing is only safe when neither is active
+// (plain/test builds, and CRSF_INPUT builds -- CRSFInput talks over
+// linkSerialPort, leaving `Serial` free).
 #if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF)
+/**
+ * @brief Prints radio link stats (and, if CRSFInput is enabled, the current
+ * RC channels + reception rate) to the USB Serial port once per second.
+ */
+class DebugMonitor : public Core::Task_Periodic {
+private:
+  uint32_t lastRxPacketCount_ = 0;
+  uint32_t lastTxPacketCount_ = 0;
+#if defined(ENABLE_CRSF_INPUT)
+  uint32_t rcFrameCount_ = 0;
+#endif
+
+public:
+  DebugMonitor() : Core::Task_Periodic("DebugMonitor", 1 * Core::SECONDS) {
+    Core::getSystemScheduler().addTask(*this);
+  }
+
+  void taskInit() override {
+    Serial.begin(115200);
+
+#if defined(ENABLE_CRSF_INPUT)
+    crsfInput.addRcChannelsHandler(
+        [this](const VCTR::packets::radiolink::RadioLinkPacket_A4D4 &) {
+          rcFrameCount_++;
+        });
+#endif
+  }
+
+  void taskThread() override {
+    auto &radioA = ExVectrLink::datalink::getDatalinkRadioA();
+    auto &fhss = ExVectrLink::datalink::getFhss();
+
+    const uint32_t rxCount = radioA.getRxPacketCount();
+    const uint32_t txCount = radioA.getTxPacketCount();
+    const uint32_t rxRate = rxCount - lastRxPacketCount_;
+    const uint32_t txRate = txCount - lastTxPacketCount_;
+    lastRxPacketCount_ = rxCount;
+    lastTxPacketCount_ = txCount;
+
+    Serial.printf("[%9.3f s] LQ:%3.0f%% PQ:%3.0f%% | RX pkts:%lu (%lu Hz) | TX "
+                  "pkts:%lu (%lu Hz)\n",
+                  (double)Core::NowNs() / (double)Core::SECONDS,
+                  (double)(fhss.getLinkQuality() * 100.0f),
+                  (double)(fhss.getPacketQuality() * 100.0f),
+                  (unsigned long)rxCount, (unsigned long)rxRate,
+                  (unsigned long)txCount, (unsigned long)txRate);
+
+#if defined(ENABLE_CRSF_INPUT)
+    const auto &rc = crsfInput.getLastRcPacket();
+    Serial.printf(
+        "             CRSF CH1:%5d CH2:%5d CH3:%5d CH4:%5d | Rate:%lu Hz\n",
+        rc.analogChannels[0], rc.analogChannels[1], rc.analogChannels[2],
+        rc.analogChannels[3], (unsigned long)rcFrameCount_);
+    rcFrameCount_ = 0;
+
+    // Low-level UART diagnostics: if rxBytes stays at 0, nothing at all is
+    // arriving on the serial port (wrong pin/serial port/wiring, or the
+    // radio isn't sending). If rxBytes grows but goodFrames stays at 0 (and
+    // crcErrors grows), bytes are arriving but are unusable -- check the
+    // baud rate matches the radio's module bay setting exactly, and check
+    // for signal inversion or half-duplex bus contention.
+    Serial.printf(
+        "             CRSF UART rxBytes:%lu resync:%lu goodFrames:%lu "
+        "crcErrors:%lu lastType:0x%02X\n",
+        (unsigned long)crsfInput.getRxByteCount(),
+        (unsigned long)crsfInput.getResyncByteCount(),
+        (unsigned long)crsfInput.getGoodFrameCount(),
+        (unsigned long)crsfInput.getCrcErrorCount(),
+        crsfInput.getLastFrameType());
+
+    // Ground-truth hex dump of the most recently received raw bytes (oldest
+    // first). A fixed/stuck value (all 0x00 or all 0xFF) means no real
+    // signal is reaching the pin at all; varied values that never happen
+    // to include 0xC8/0xEA/0xEC/0xEE point at inversion, wrong baud, or a
+    // framing/bit-order mismatch rather than a wiring problem.
+    uint8_t rawSnapshot[CRSFInput::getRawByteSnapshotLen()];
+    crsfInput.copyRawByteSnapshot(rawSnapshot);
+    Serial.print("             CRSF raw bytes:");
+    for (uint8_t i = 0; i < CRSFInput::getRawByteSnapshotLen(); i++) {
+      Serial.printf(" %02X", rawSnapshot[i]);
+    }
+    Serial.println();
+#endif
+  }
+};
+DebugMonitor debugMonitor;
+#endif
+
+#if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF) &&                          \
+    !defined(ENABLE_CRSF_INPUT)
 class ErrorSender : public Core::Task_Periodic {
 public:
   ErrorSender() : Core::Task_Periodic("ErrorSender", 0.1001 * Core::SECONDS) {
@@ -331,14 +444,16 @@ void setup() {
 
   // delay(5000);
 
-#if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF)
+#if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF) &&                          \
+    !defined(ENABLE_CRSF_INPUT)
   Serial.begin(115200);
 #endif
 
   pinMode(HardwareConfig::button, INPUT_PULLUP);
 
   // Serial.begin(115200);
-#if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF)
+#if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF) &&                          \
+    !defined(ENABLE_CRSF_INPUT)
   linkSerialPort.begin(1000000, SERIAL_8N1, HardwareConfig::serialRx,
                        HardwareConfig::serialTx);
 #endif
@@ -386,12 +501,18 @@ void setup() {
                   onRadioBDio1, RISING);
 #endif
 
-#ifndef TARGET_EXVECTRCONTROLLER
+#if !defined(TARGET_EXVECTRCONTROLLER) && !defined(TARGET_EXVECTRLINKTXMODULE)
   VCTR::ExVectrLink::datalink::getFhss().setIsRxSide(true);
 #else
   VCTR::ExVectrLink::datalink::getFhss().setIsRxSide(false);
 #endif
 
+  // Unlike ENABLE_SBUS/ENABLE_CRSF (which hijack the USB `Serial` port for
+  // their own protocol framing), CRSFInput talks over a separate
+  // `linkSerialPort`, leaving `Serial` free -- so Core::initialise() (which
+  // wires up Core::printM/D/W/E to Serial) is safe and should still run for
+  // CRSF_INPUT builds too. Skipping it here previously silenced all
+  // library debug/error/warning output.
 #if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF)
   Core::initialise();
 #endif
@@ -399,6 +520,23 @@ void setup() {
   ExVectrLink::radio::initRadioDrivers();
 
   ExVectrLink::datalink::initCommandManager(serialTelecoms);
+
+#if defined(ENABLE_CRSF_INPUT)
+  // Forward every decoded RC_CHANNELS_PACKED frame from the handset straight
+  // to the FHSS uplink, tagged the same way SerialTelecoms' PacketData
+  // handler does it (see DatalinkCommandManager.cpp), so the receive side
+  // (CRSFOutput) doesn't need to know or care whether the RC data on this
+  // end came from CRSF or a serial host app.
+  crsfInput.addRcChannelsHandler(
+      [](const VCTR::packets::radiolink::RadioLinkPacket_A4D4 &packet) {
+        VCTR::network::DataPacket otaPkt;
+        otaPkt.payload.setSize(packet.numBytes() + 1);
+        packet.serialize(otaPkt.payload.getPtr());
+        otaPkt.payload[packet.numBytes()] =
+            (uint8_t)ExVectrLink::datalink::PacketTypes::Data;
+        ExVectrLink::datalink::getFhss().transmitDataframe(otaPkt);
+      });
+#endif
 
   WifiUpload::initWifiUpload(serialTelecoms);
 
@@ -431,7 +569,7 @@ void setup() {
   ExVectrLink::datalink::getDynamicPower().setPower(20);
   ExVectrLink::datalink::setupDynamicPower();
 
-#if defined(ENABLE_SBUS) || defined(ENABLE_CRSF)
+#if defined(ENABLE_SBUS) || defined(ENABLE_CRSF) || defined(ENABLE_CRSF_INPUT)
   Core::getSystemScheduler().removeTask(serialTelecoms);
   serialTelecoms.setDisabled();
 #endif

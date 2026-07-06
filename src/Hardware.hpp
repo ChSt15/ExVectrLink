@@ -9,6 +9,10 @@
 #include "targets/ExVectrControllerLink.hpp"
 #endif
 
+#if defined(TARGET_EXVECTRLINKTXMODULE)
+#include "targets/ExVectrLinkTxModule.hpp"
+#endif
+
 #if defined(TARGET_GENERICESP8285)
 #include "targets/GenericEsp8266.hpp"
 #endif
