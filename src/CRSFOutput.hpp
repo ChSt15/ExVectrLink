@@ -9,6 +9,7 @@
 #include "ExVectrCore/list_buffer.hpp"
 #include "ExVectrCore/scheduler2.hpp"
 #include "ExVectrPackets/Packets.hpp"
+#include "ExVectrPackets/crsf/packets/CRSFPackets.hpp"
 #include "ExVectrPackets/radiolink/packets/RadioLinkPackets.hpp"
 #include "ExVectrPackets/telecoms/packets/Telemetry.hpp"
 
@@ -26,11 +27,8 @@ uint16_t getCrsfTxFailureRateHz();
 class CRSFOutput : public Core::Task_Periodic {
 private:
   // ── CRSF protocol constants ──
-  static constexpr uint8_t CRSF_SYNC_BYTE = 0xC8;
   static constexpr uint8_t CRSF_FRAMETYPE_GPS = 0x02;
   static constexpr uint8_t CRSF_FRAMETYPE_BATTERY_SENSOR = 0x08;
-  static constexpr uint8_t CRSF_FRAMETYPE_RC_CHANNELS = 0x16;
-  static constexpr uint8_t CRSF_FRAMETYPE_LINK_STATISTICS = 0x14;
   static constexpr uint16_t CRSF_CHANNEL_MIN = 172;
   static constexpr uint16_t CRSF_CHANNEL_MID = 992;
   static constexpr uint16_t CRSF_CHANNEL_MAX = 1811;
@@ -41,13 +39,11 @@ private:
 
   // ── CRSF incoming frame parsing (for bind → upload mode) ──
   static constexpr uint8_t CRSF_FRAMETYPE_COMMAND = 0x32;
-  static constexpr uint8_t CRSF_COMMAND_SUBCMD_RX = 0x10;
-  static constexpr uint8_t CRSF_COMMAND_SUBCMD_RX_BIND = 0x01;
   static constexpr uint8_t CRSF_MAX_FRAME_LEN = 64;
   uint8_t rxBuf_[CRSF_MAX_FRAME_LEN];
   uint8_t rxBufPos_ = 0;
   void processIncomingBytes();
-  void handleCrsfFrame(const uint8_t *frame, uint8_t len);
+  void handleCrsfFrame(const uint8_t *frame);
 
   // ── Packet handling ──
   VCTR::packets::PacketManager packetManager_;
@@ -72,17 +68,15 @@ private:
   // ── Helpers ──
   static uint8_t crc8_dvb_s2(uint8_t crc, uint8_t byte);
   static uint8_t calculateCRC(const uint8_t *data, size_t length);
-  static uint16_t readU16BE(const uint8_t *data);
   static uint16_t normToCrsf(int16_t val);
 
-  void packChannels(const uint16_t *channels, uint8_t *payload);
   bool queueSerialFrame(const uint8_t *frame, size_t frameSize);
   void flushSerialWriteBuffer();
   void writeRcChannelsFrame();
   void writeLinkStatsFrame();
   void queueMessages();
-  void forwardBatteryTelemetry(const uint8_t *frame, uint8_t len);
-  void forwardGpsTelemetry(const uint8_t *frame, uint8_t len);
+  void forwardBatteryTelemetry(const uint8_t *frame);
+  void forwardGpsTelemetry(const uint8_t *frame);
 
 public:
   CRSFOutput();
