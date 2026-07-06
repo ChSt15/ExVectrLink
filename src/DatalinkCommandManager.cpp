@@ -12,7 +12,7 @@
 #include "FhssSetup.hpp"
 
 #if defined(ENABLE_CRSF)
-#include "CRSFOutput.hpp"
+#include "CRSFRcOutput.hpp"
 #endif
 
 #include "DatalinkCommandManager.hpp"
@@ -32,6 +32,8 @@ uint16_t rxCrsfTxFailures = 0;
 static RemoteLinkStats remoteStats;
 
 const RemoteLinkStats &getRemoteLinkStats() { return remoteStats; }
+
+uint8_t getRemotePacketQuality() { return rxPacketQuality; }
 
 static uint8_t quantizeLinkQualityPercent(float lq);
 

@@ -29,5 +29,10 @@ int8_t getLocalTxPowerdBm();
 /// Returns the most recently decoded far-end link stats (from OTA LinkInfo).
 const RemoteLinkStats &getRemoteLinkStats();
 
+/// Returns the far end's packet quality (0-100 %), from the OTA RxState
+/// packet. Kept separate from RemoteLinkStats since it arrives via a
+/// different OTA packet type (RxState vs LinkTelemetry).
+uint8_t getRemotePacketQuality();
+
 } // namespace VCTR::ExVectrLink::datalink
 #endif // EXVECRLINK_DATALINKCOMMANDMANAGER_HPP

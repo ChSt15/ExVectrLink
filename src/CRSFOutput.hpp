@@ -15,9 +15,6 @@
 
 namespace VCTR::ExVectrLink {
 
-uint16_t getCrsfRcPacketRateHz();
-uint16_t getCrsfTxFailureRateHz();
-
 /**
  * @brief Outputs CRSF protocol frames (RC channels + link statistics) over a
  * HardwareSerial port. Designed as a non-blocking periodic task (<1ms per

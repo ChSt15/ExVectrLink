@@ -75,9 +75,6 @@ void noteCrsfTxFailure(int64_t nowNs) {
 
 } // namespace
 
-uint16_t getCrsfRcPacketRateHz() { return rcPacketRateHz; }
-uint16_t getCrsfTxFailureRateHz() { return crsfTxFailureRateHz; }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Construction
 // ─────────────────────────────────────────────────────────────────────────────
