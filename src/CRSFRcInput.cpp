@@ -2,6 +2,8 @@
 
 #ifdef ENABLE_CRSF_INPUT
 
+#include <cstring>
+
 #include "ExVectrCore.hpp"
 
 #include "DatalinkCommandManager.hpp"
@@ -47,7 +49,8 @@ CRSFRcInput::CRSFRcInput(HardwareSerial &serial, int8_t rxPin, int8_t txPin,
     : Core::Task_Periodic("CRSFRcInput", 2 * Core::MILLISECONDS),
       serial_(serial), rxPin_(rxPin), txPin_(txPin), baudRate_(baudRate),
       invert_(invert), uartNum_(uartNum),
-      crsf_(serial, CRSFDuplex::Half, baudRate, rxPin, uartNum, invert) {
+      crsf_(serial, CRSFDuplex::Half, baudRate, rxPin, uartNum, invert),
+      telemetryPacketManager_([](const VCTR::Core::ListArray<uint8_t> &) {}) {
   Core::getSystemScheduler().addTask(*this);
 }
 
@@ -83,6 +86,8 @@ void CRSFRcInput::taskInit() {
 #else
   serial_.begin(baudRate_);
 #endif
+
+  registerTelemetryForwarding();
 }
 
 void CRSFRcInput::taskCheck() {
@@ -151,6 +156,56 @@ void CRSFRcInput::writeLinkStatsFrame() {
   pkt.downSnr = (int8_t)radio.getPacketSNR();
 
   sendTelemetry(pkt);
+}
+
+void CRSFRcInput::registerTelemetryForwarding() {
+  // Every FC -> handset telemetry type is wired up the same way: decode it
+  // out of the FHSS downlink, convert to the matching CRSF frame, queue it.
+  // Adding a new telemetry source is one more forwardTelemetry<>() call --
+  // nothing else here needs to change.
+  forwardTelemetry<VCTR::packets::telecoms::Telemetry_Battery,
+                   VCTR::packets::crsf::CRSFPacket_BatterySensor>(
+      [](const VCTR::packets::telecoms::Telemetry_Battery &t) {
+        VCTR::packets::crsf::CRSFPacket_BatterySensor pkt;
+        pkt.voltage = t.voltage;
+        pkt.current = t.current;
+        // Telemetry_Battery doesn't carry these (kept compact for the OTA
+        // link) -- report unknown rather than a misleading fixed number.
+        pkt.capacityUsedMah = 0;
+        pkt.remainingPercent = 0;
+        return pkt;
+      });
+
+  forwardTelemetry<VCTR::packets::telecoms::Telemetry_GNSS,
+                   VCTR::packets::crsf::CRSFPacket_GPS>(
+      [](const VCTR::packets::telecoms::Telemetry_GNSS &t) {
+        VCTR::packets::crsf::CRSFPacket_GPS pkt;
+        pkt.groundspeedKmh = (float)t.speed;
+        pkt.satellites = t.satellites;
+        // Telemetry_GNSS doesn't carry position/heading/altitude (kept
+        // compact for the OTA link) -- left at their zero defaults.
+        return pkt;
+      });
+
+  // Feed every FHSS downlink PacketTypes::Data payload into the telemetry
+  // PacketManager above; each registered forwardTelemetry<>() handler
+  // tries its own deserialize() and only the matching type fires. Mirrors
+  // CRSFRcOutput's uplink registration for RC channels/telecommands.
+  ExVectrLink::datalink::getFhss().addReceiveHandler(
+      [this](const VCTR::network::DataPacket &data) {
+        if (data.payload.size() == 0) {
+          return;
+        }
+        if (data.payload[data.payload.size() - 1] !=
+            (uint8_t)ExVectrLink::datalink::PacketTypes::Data) {
+          return;
+        }
+        VCTR::Core::ListArray<uint8_t> stripped;
+        stripped.setSize(data.payload.size() - 1);
+        memcpy(stripped.getPtr(), data.payload.getPtr(),
+               data.payload.size() - 1);
+        telemetryPacketManager_.receivePacketData(stripped);
+      });
 }
 
 int16_t CRSFRcInput::crsfToNorm(uint16_t val) {

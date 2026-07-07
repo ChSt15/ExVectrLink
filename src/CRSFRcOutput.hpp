@@ -4,7 +4,9 @@
 #ifdef ENABLE_CRSF
 
 #include <Arduino.h>
+#include <functional>
 
+#include "ExVectrCore/list_array.hpp"
 #include "ExVectrCore/scheduler2.hpp"
 #include "ExVectrCore/task_types.hpp"
 #include "ExVectrPackets/Packets.hpp"
@@ -23,13 +25,18 @@ uint16_t getCrsfTxFailureRateHz();
 
 /**
  * @brief Sends CRSF RC_CHANNELS_PACKED frames to a flight controller, built
- * on the generic CRSF class.
+ * on the generic CRSF class. Also relays FC -> ground telemetry: any
+ * supported CRSF frame the FC sends back over the wire (battery sensor,
+ * GPS, ...) is converted to the matching VCTR::packets::telecoms
+ * Telemetry_* packet and sent over the FHSS downlink -- see
+ * registerCrsfTelemetryForwarding(). The ground TX module's CRSFRcInput
+ * mirrors this: it decodes the same Telemetry_* packets back out of the
+ * downlink and re-encodes them as CRSF frames for the handset, so adding a
+ * new telemetry type only needs a forwardCrsfTelemetry<>() call here plus a
+ * matching forwardTelemetry<>() call in CRSFRcInput.
  *
- * This is the first step of moving CRSFOutput's responsibilities onto the
- * new CRSF system: only RC-channel output is handled here. Link statistics,
- * FC->ground telemetry relay, and bind-command detection are not yet ported
- * -- see CRSFOutput for the previous, still-complete implementation of
- * those.
+ * Link statistics and bind-command detection are not yet ported -- see
+ * CRSFOutput for the previous, still-complete implementation of those.
  */
 class CRSFRcOutput : public Core::Task_Periodic {
 private:
@@ -51,6 +58,30 @@ private:
   static uint16_t normToCrsf(int16_t val);
 
   void writeRcChannelsFrame();
+
+  // ── FC -> ground telemetry relay ──
+  // Each entry attempts to read one supported CRSF telemetry frame type off
+  // crsf_'s received-frame queue and, on success, forwards it over FHSS;
+  // returns false (queue untouched) if the next queued frame isn't its
+  // type, so taskThread() can just try each in turn. See
+  // registerCrsfTelemetryForwarding() for what's currently wired up.
+  Core::ListArray<std::function<bool(CRSF &)>> crsfTelemetryHandlers_;
+  void registerCrsfTelemetryForwarding();
+
+  /**
+   * @brief Registers a conversion from a CRSF telemetry frame type to an
+   * ExVectrPackets telemetry type: whenever `CrsfT` is the next queued
+   * frame read off the FC's CRSF wire, `convert` is applied and the result
+   * sent over the FHSS downlink. This is the one place new FC->ground
+   * telemetry types need to hook into.
+   */
+  template <VCTR::packets::IsPacket CrsfT, VCTR::packets::IsPacket ExVectrT>
+  void forwardCrsfTelemetry(std::function<ExVectrT(const CrsfT &)> convert);
+
+  /// Serializes `packet`, tags it PacketTypes::Data, and sends it over the
+  /// FHSS downlink -- same tagging CRSFRcInput's RC-channel uplink and
+  /// DatalinkCommandManager's generic Data forwarding use.
+  template <VCTR::packets::IsPacket T> void sendOverFhss(const T &packet);
 
 public:
   /**

@@ -7,6 +7,7 @@
 #include "ExVectrCore.hpp"
 #include "ExVectrPackets/crsf/packets/CRSFPackets.hpp"
 #include "ExVectrPackets/telecoms/packets/Telecommands.hpp"
+#include "ExVectrPackets/telecoms/packets/Telemetry.hpp"
 
 #include "ExVectrLink/datalink/PacketTypes.hpp"
 #include "FhssSetup.hpp"
@@ -105,6 +106,8 @@ void CRSFRcOutput::taskInit() {
           [](const VCTR::packets::telecoms::Telecommand_UpdateMode &) {
             WifiUpload::startWiFiUploadMode();
           });
+
+  registerCrsfTelemetryForwarding();
 }
 
 void CRSFRcOutput::taskCheck() {
@@ -122,13 +125,76 @@ void CRSFRcOutput::taskThread() {
   updateCrsfStatsWindow(nowNs);
 
   // Pump the port: flushes any outgoing bytes that didn't fit on the wire
-  // last time. Received frames are ignored for now (nothing consumes them).
+  // last time, and parses any newly arrived bytes from the FC.
   crsf_.available();
+
+  // Drain every queued frame: try each registered telemetry conversion in
+  // turn (matches CRSFRcInput's incoming-frame loop), discard anything none
+  // of them recognise so it can never wedge behind an unsupported type.
+  while (crsf_.peekFrameType() != 0) {
+    bool handled = false;
+    for (size_t i = 0; i < crsfTelemetryHandlers_.size(); i++) {
+      if (crsfTelemetryHandlers_[i](crsf_)) {
+        handled = true;
+        break;
+      }
+    }
+    if (!handled) {
+      crsf_.discardFrame();
+    }
+  }
 
   if (newRcPacket_) {
     writeRcChannelsFrame();
     newRcPacket_ = false;
   }
+}
+
+template <VCTR::packets::IsPacket CrsfT, VCTR::packets::IsPacket ExVectrT>
+void CRSFRcOutput::forwardCrsfTelemetry(
+    std::function<ExVectrT(const CrsfT &)> convert) {
+  crsfTelemetryHandlers_.append([this, convert](CRSF &crsf) -> bool {
+    CRSF::ReceivedPacket<CrsfT> received;
+    if (!crsf.read(received)) {
+      return false;
+    }
+    sendOverFhss(convert(received.packet));
+    return true;
+  });
+}
+
+template <VCTR::packets::IsPacket T>
+void CRSFRcOutput::sendOverFhss(const T &packet) {
+  VCTR::network::DataPacket otaPkt;
+  otaPkt.payload.setSize(packet.numBytes() + 1);
+  packet.serialize(otaPkt.payload.getPtr());
+  otaPkt.payload[packet.numBytes()] =
+      (uint8_t)ExVectrLink::datalink::PacketTypes::Data;
+  ExVectrLink::datalink::getFhss().transmitDataframe(otaPkt);
+}
+
+void CRSFRcOutput::registerCrsfTelemetryForwarding() {
+  // Every FC -> ground telemetry type is wired up the same way: read it off
+  // the FC's CRSF wire, convert to the matching ExVectrPackets type, send
+  // over FHSS. Adding a new telemetry source is one more
+  // forwardCrsfTelemetry<>() call -- nothing else here needs to change.
+  forwardCrsfTelemetry<VCTR::packets::crsf::CRSFPacket_BatterySensor,
+                      VCTR::packets::telecoms::Telemetry_Battery>(
+      [](const VCTR::packets::crsf::CRSFPacket_BatterySensor &c) {
+        VCTR::packets::telecoms::Telemetry_Battery t;
+        t.voltage = c.voltage;
+        t.current = c.current;
+        return t;
+      });
+
+  forwardCrsfTelemetry<VCTR::packets::crsf::CRSFPacket_GPS,
+                      VCTR::packets::telecoms::Telemetry_GNSS>(
+      [](const VCTR::packets::crsf::CRSFPacket_GPS &c) {
+        VCTR::packets::telecoms::Telemetry_GNSS t;
+        t.speed = (uint16_t)c.groundspeedKmh;
+        t.satellites = c.satellites;
+        return t;
+      });
 }
 
 uint16_t CRSFRcOutput::normToCrsf(int16_t val) {

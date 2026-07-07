@@ -30,8 +30,37 @@ uint16_t rxCrsfTxFailures = 0;
 
 /// Decoded far-end link stats from the last received OTA LinkInfo packet.
 static RemoteLinkStats remoteStats;
+/// Core::NowNs() timestamp of the last OTA packet received from the far end,
+/// of ANY type (Data, LinkTelemetry, RxState, ...) -- not just LinkTelemetry,
+/// since e.g. RC channel Data packets flow far more often and are just as
+/// good evidence the link is still alive.
+static int64_t lastRemotePacketNs = 0;
 
-const RemoteLinkStats &getRemoteLinkStats() { return remoteStats; }
+// How long without ANY OTA packet from the far end before it's considered
+// gone. Mirrors ExpressLRS's tx_main.cpp UpdateConnectDisconnectStatus(),
+// which declares the link down after missing RX_LOSS_CNT telemetry packets
+// in a row -- but keyed off any packet here, since LinkTelemetry specifically
+// is only sent by LinkInfoSender roughly every 200ms (with an occasional
+// ~1s gap for the interleaved RxState packet), while e.g. RC channel Data
+// packets normally arrive far more frequently and are just as valid a signal
+// that the far end is still there.
+static constexpr int64_t REMOTE_LINK_STATS_TIMEOUT_NS =
+    1000 * Core::MILLISECONDS;
+
+const RemoteLinkStats &getRemoteLinkStats() {
+  // Lazily invalidate a stale cache: without this, remoteStats.valid stayed
+  // true forever after the first OTA packet, so consumers (e.g. CRSFRcInput's
+  // CRSF Link Statistics to the handset) kept reporting the last-known-good
+  // LQ/RSSI/SNR indefinitely even after the far end actually went away --
+  // exactly the "telemetry lost but nothing shows it" gap ExpressLRS's own
+  // connectionState timeout exists to avoid.
+  if (remoteStats.valid &&
+      Core::NowNs() - lastRemotePacketNs > REMOTE_LINK_STATS_TIMEOUT_NS) {
+    remoteStats.valid = false;
+    remoteStats.linkQuality = 0;
+  }
+  return remoteStats;
+}
 
 uint8_t getRemotePacketQuality() { return rxPacketQuality; }
 
@@ -361,6 +390,10 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
     if (packet.payload.size() == 0) {
       return;
     }
+    // Any packet from the far end (RC channels, telemetry, link stats, ...)
+    // is evidence the link is still alive -- see REMOTE_LINK_STATS_TIMEOUT_NS.
+    lastRemotePacketNs = Core::NowNs();
+
     // Last byte is always the packet type.
     uint8_t pktType = packet.payload[packet.payload.size() - 1];
 

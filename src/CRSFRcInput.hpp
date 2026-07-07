@@ -5,10 +5,14 @@
 
 #include <Arduino.h>
 
+#include <functional>
+
 #include "ExVectrCore/scheduler2.hpp"
 #include "ExVectrCore/task_types.hpp"
+#include "ExVectrPackets/Packets.hpp"
 #include "ExVectrPackets/crsf/packets/CRSFPackets.hpp"
 #include "ExVectrPackets/radiolink/packets/RadioLinkPackets.hpp"
+#include "ExVectrPackets/telecoms/packets/Telemetry.hpp"
 
 #include "CRSF.hpp"
 
@@ -31,6 +35,14 @@ namespace VCTR::ExVectrLink {
  * RC_CHANNELS_PACKED frame is received, via the GPIO matrix (see
  * CRSF::switchToRx()/switchToTx()), and back to RX once it's sent. Queue
  * telemetry to send back to the handset with sendTelemetry().
+ *
+ * Also relays FC -> handset telemetry: any VCTR::packets::telecoms
+ * Telemetry_* packet arriving over the FHSS downlink (tagged
+ * PacketTypes::Data, same as CRSFOutput sends when it decodes them off the
+ * FC's own CRSF wire) is converted to the matching CRSF telemetry frame and
+ * queued via sendTelemetry() -- see registerTelemetryForwarding(). Adding a
+ * new telemetry type to relay is a single forwardTelemetry<>() call there,
+ * not a new hand-rolled decode/convert/send path.
  */
 class CRSFRcInput : public Core::Task_Periodic {
 private:
@@ -57,6 +69,28 @@ private:
 
   void forwardRcChannels(
       const VCTR::packets::crsf::CRSFPacket_RcChannelsPacked &pkt);
+
+  // ── FC -> handset telemetry relay ──
+  // Decodes VCTR::packets::telecoms Telemetry_* packets out of the FHSS
+  // downlink's raw PacketTypes::Data payloads; see
+  // registerTelemetryForwarding() for what's currently wired up.
+  VCTR::packets::PacketManager telemetryPacketManager_;
+  void registerTelemetryForwarding();
+
+  /**
+   * @brief Registers a conversion from an incoming ExVectrPackets telemetry
+   * type to a CRSF telemetry frame: whenever `SourceT` is decoded out of
+   * the FHSS downlink, `convert` is applied and the result queued via
+   * sendTelemetry(). This is the one place new telemetry sources need to
+   * hook into -- no other code needs to change.
+   */
+  template <VCTR::packets::IsPacket SourceT, VCTR::packets::IsPacket CrsfT>
+  void forwardTelemetry(std::function<CrsfT(const SourceT &)> convert) {
+    telemetryPacketManager_.addPacketReceiveHandler<SourceT>(
+        [this, convert](const SourceT &packet) {
+          sendTelemetry(convert(packet));
+        });
+  }
 
 public:
   /**
