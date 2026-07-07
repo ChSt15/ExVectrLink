@@ -233,10 +233,13 @@ VCTR::ExVectrLink::CRSFRcOutput crsfRcOutput(Serial);
 // never produce a CRC match by chance. The "goes silent once fully seated"
 // symptom looks like a physical/mechanical connection problem rather than
 // a polarity one -- see notes at the CRSFRcInput instantiation site.
+// uartNum=1 matches `HardwareSerial linkSerialPort(1)` above -- needed so
+// CRSFRcInput/CRSF can drive the GPIO matrix directly for half-duplex
+// direction switching on the shared serialRx/serialTx pin.
 VCTR::ExVectrLink::CRSFRcInput crsfRcInput(linkSerialPort,
                                            HardwareConfig::serialRx,
                                            HardwareConfig::serialTx, 400000,
-                                           true);
+                                           true, 1);
 #endif
 
 /**

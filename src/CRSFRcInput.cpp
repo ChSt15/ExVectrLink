@@ -4,6 +4,7 @@
 
 #include "ExVectrCore.hpp"
 
+#include "DatalinkCommandManager.hpp"
 #include "ExVectrLink/datalink/PacketTypes.hpp"
 #include "FhssSetup.hpp"
 
@@ -12,13 +13,41 @@ namespace VCTR::ExVectrLink {
 namespace {
 constexpr uint16_t CRSF_CHANNEL_MIN = 172;
 constexpr uint16_t CRSF_CHANNEL_MAX = 1811;
+
+// Maps a dBm value to the CRSF Link Statistics power-index enum: 0mW,
+// 10mW, 25mW, 100mW, 500mW, 1000mW, 2000mW, 250mW, 50mW. Same table as
+// CRSFOutput::writeLinkStatsFrame() uses for the FC-facing side.
+uint8_t crsfPowerIndex(int8_t dbm) {
+  if (dbm <= 0) {
+    return 0; // 0 mW
+  } else if (dbm <= 10) {
+    return 1; // 10 mW
+  } else if (dbm <= 14) {
+    return 2; // 25 mW
+  } else if (dbm <= 17) {
+    return 8; // 50 mW
+  } else if (dbm <= 20) {
+    return 3; // 100 mW
+  } else if (dbm <= 24) {
+    return 7; // 250 mW
+  } else if (dbm <= 27) {
+    return 4; // 500 mW
+  } else if (dbm <= 30) {
+    return 5; // 1000 mW
+  } else if (dbm <= 33) {
+    return 6; // 2000 mW
+  }
+  return 0;
+}
+
 } // namespace
 
 CRSFRcInput::CRSFRcInput(HardwareSerial &serial, int8_t rxPin, int8_t txPin,
-                         uint32_t baudRate, bool invert)
+                         uint32_t baudRate, bool invert, uint8_t uartNum)
     : Core::Task_Periodic("CRSFRcInput", 2 * Core::MILLISECONDS),
       serial_(serial), rxPin_(rxPin), txPin_(txPin), baudRate_(baudRate),
-      invert_(invert), crsf_(serial, CRSFDuplex::Half, baudRate) {
+      invert_(invert), uartNum_(uartNum),
+      crsf_(serial, CRSFDuplex::Half, baudRate, rxPin, uartNum, invert) {
   Core::getSystemScheduler().addTask(*this);
 }
 
@@ -35,10 +64,17 @@ void CRSFRcInput::taskInit() {
     // triggered the ESP32's automatic RS485-half-duplex hardware mode,
     // whose auto-RTS logic gated the receiver on our own transmit activity
     // and left it effectively permanently disabled. Only attach the pad as
-    // UART RX (leave TX unmapped/floating) so we purely listen and never
-    // drive the shared line ourselves -- this class never calls
-    // crsf_.write() in Half duplex mode anyway (see CRSF::writeFrame()).
-    serial_.begin(baudRate_, SERIAL_8N1, rxPin_, -1, invert_);
+    // UART RX (leave TX unmapped/floating) at begin() time -- crsf_ takes
+    // over from there, rerouting the pad to TX via the GPIO matrix for the
+    // duration of each reply (see CRSF::switchToRx()/switchToTx()).
+    //
+    // invert is intentionally NOT passed here (always false): inversion is
+    // instead handled entirely inside CRSF's direction switching, which is
+    // what makes it come out correct across repeated RX<->TX switches --
+    // mirrors ExpressLRS's CRSFHandset::Begin()/duplex_set_RX()/
+    // duplex_set_TX().
+    serial_.begin(baudRate_, SERIAL_8N1, rxPin_, -1, false);
+    crsf_.beginHalfDuplex();
   } else if (rxPin_ >= 0 && txPin_ >= 0) {
     serial_.begin(baudRate_, SERIAL_8N1, rxPin_, txPin_, invert_);
   } else {
@@ -49,7 +85,26 @@ void CRSFRcInput::taskInit() {
 #endif
 }
 
+void CRSFRcInput::taskCheck() {
+  // Wake up as soon as bytes arrive rather than waiting for the next
+  // periodic tick -- the handset expects its telemetry reply immediately
+  // after its own frame finishes, so latency here directly matters (see
+  // CRSF::sendHalfDuplexReply(), which fires synchronously inside the next
+  // taskThread()'s crsf_.available() call).
+  if (serial_.available() > 0) {
+    setDeadline(Core::NowNs());
+  }
+}
+
 void CRSFRcInput::taskThread() {
+  // Queue fresh link stats before pumping the port, so if a reply goes out
+  // this tick it carries current numbers rather than lagging by one frame.
+  const int64_t nowNs = Core::NowNs();
+  if (nowNs - lastLinkStatsSendNs_ >= LINK_STATS_INTERVAL_NS) {
+    lastLinkStatsSendNs_ = nowNs;
+    writeLinkStatsFrame();
+  }
+
   crsf_.available();
 
   // Drain every queued frame each tick: forward RC channels, discard
@@ -66,6 +121,36 @@ void CRSFRcInput::taskThread() {
     }
     crsf_.discardFrame();
   }
+}
+
+void CRSFRcInput::writeLinkStatsFrame() {
+  const auto &radio = ExVectrLink::datalink::getDatalinkRadioA();
+  const auto &fhss = ExVectrLink::datalink::getFhss();
+  const auto &remote = ExVectrLink::datalink::getRemoteLinkStats();
+
+  VCTR::packets::crsf::CRSFPacket_LinkStatistics pkt;
+
+  // Uplink (this TX module -> FC): the FC is the one receiving it, so its
+  // self-reported OTA stats (relayed back to us over the radio link) are
+  // the correct source -- mirrors CRSFOutput::writeLinkStatsFrame()'s
+  // reasoning, from the other end of the link.
+  pkt.upRssiAnt1 = remote.valid ? (uint8_t)(-remote.rssi) : 0;
+  pkt.upRssiAnt2 = 0;
+  pkt.upLinkQuality = remote.valid ? remote.linkQuality : 0;
+  pkt.upSnr = remote.valid ? remote.snr : 0;
+  pkt.activeAntenna = remote.valid ? remote.antenna : 0;
+  pkt.rfProfile = 4;
+  pkt.upRfPower =
+      crsfPowerIndex(ExVectrLink::datalink::getLocalTxPowerdBm());
+
+  // Downlink (FC -> this TX module): received directly, so use our own
+  // local radio readings.
+  const int16_t rssiRaw = radio.getPacketRSSI();
+  pkt.downRssi = (rssiRaw < 0) ? (uint8_t)(-rssiRaw) : 0;
+  pkt.downLinkQuality = (uint8_t)(fhss.getLinkQuality() * 100.0f);
+  pkt.downSnr = (int8_t)radio.getPacketSNR();
+
+  sendTelemetry(pkt);
 }
 
 int16_t CRSFRcInput::crsfToNorm(uint16_t val) {

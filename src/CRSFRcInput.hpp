@@ -24,11 +24,13 @@ namespace VCTR::ExVectrLink {
  * the diagnostic counters/raw-byte snapshot are not ported yet -- see
  * CRSFInput for the previous, still-complete implementation of those.
  *
- * Runs the underlying CRSF object in CRSFDuplex::Half. On this hardware a
- * shared single-wire module bay pin (rxPin == txPin) is handled by binding
- * only RX to the pin and leaving TX unmapped (see taskInit()) -- this class
- * never calls crsf_.write(), so CRSF::write() always failing in Half mode
- * never matters here.
+ * Runs the underlying CRSF object in CRSFDuplex::Half. On a shared
+ * single-wire module bay pin (rxPin == txPin), the port is initially bound
+ * with only RX attached (see taskInit()); CRSF then reroutes the pin to
+ * UART TX for the duration of a single reply frame immediately after each
+ * RC_CHANNELS_PACKED frame is received, via the GPIO matrix (see
+ * CRSF::switchToRx()/switchToTx()), and back to RX once it's sent. Queue
+ * telemetry to send back to the handset with sendTelemetry().
  */
 class CRSFRcInput : public Core::Task_Periodic {
 private:
@@ -37,12 +39,18 @@ private:
   int8_t txPin_;
   uint32_t baudRate_;
   bool invert_;
+  uint8_t uartNum_;
 
   CRSF crsf_;
 
   VCTR::packets::radiolink::RadioLinkPacket_A4D4 lastRcPacket_{};
   int64_t lastRcPacketTime_ = 0;
   uint32_t rcFrameCount_ = 0;
+
+  // Link-stats telemetry cadence (sent back to the handset).
+  static constexpr int64_t LINK_STATS_INTERVAL_NS = 100 * Core::MILLISECONDS;
+  int64_t lastLinkStatsSendNs_ = 0;
+  void writeLinkStatsFrame();
 
   static int16_t crsfToNorm(uint16_t val);
   static uint8_t digitalFromCrsf(uint16_t val);
@@ -64,13 +72,30 @@ public:
    * external-module baud rate exactly.
    * @param invert Set true if the physical signal is logic-inverted, as is
    * common on S.Port-style single-wire module bay pins.
+   * @param uartNum The ESP32 UART peripheral number `serial` wraps (e.g.
+   * HardwareSerial(1) -> 1). Only used (and required) when rxPin == txPin,
+   * to drive the GPIO-matrix direction switching for the shared pin.
    */
   explicit CRSFRcInput(HardwareSerial &serial, int8_t rxPin = -1,
                        int8_t txPin = -1, uint32_t baudRate = 400000,
-                       bool invert = false);
+                       bool invert = false, uint8_t uartNum = 0);
 
   void taskInit() override;
+  void taskCheck() override;
   void taskThread() override;
+
+  /**
+   * @brief Queues a CRSF packet to be sent back to the handset as
+   * telemetry. On the shared half-duplex pin this is only ever actually
+   * put on the wire the instant the next RC_CHANNELS_PACKED frame is fully
+   * received (see CRSF::sendHalfDuplexReply()); only the single freshest
+   * queued packet is kept, so calling this faster than frames arrive just
+   * replaces the pending one.
+   * @return false if the packet is too large to fit in one CRSF frame.
+   */
+  template <VCTR::packets::IsPacket T> bool sendTelemetry(const T &packet) {
+    return crsf_.write(packet);
+  }
 
   // ── Diagnostics ──
   // Minimal visibility for bench testing; see CRSFInput for the fuller

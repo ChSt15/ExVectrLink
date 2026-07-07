@@ -40,10 +40,12 @@ constexpr int sx1280AMaxPower = 10;
 
 // The RadioMaster Pocket's "nano" external module bay exposes CRSF as a
 // single, half-duplex signal wire (S.Port style) rather than separate RX/TX
-// lines. Both must therefore point at the SAME physical pin -- CRSFInput
-// puts the UART into RS485 half-duplex mode when rxPin == txPin so the pad
-// only drives the bus while actually transmitting telemetry, and otherwise
-// stays high-impedance so it does not fight the handset's driver.
+// lines. Both must therefore point at the SAME physical pin -- CRSFRcInput
+// binds the pad as UART RX only, and CRSF reroutes it to UART TX via the
+// GPIO matrix for the duration of each reply frame (see
+// CRSF::switchToRx()/switchToTx()), so it only drives the bus while
+// actually transmitting telemetry and otherwise stays high-impedance so it
+// does not fight the handset's driver.
 constexpr int serialRx = 12;
 constexpr int serialTx = 12;
 
