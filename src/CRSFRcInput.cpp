@@ -8,6 +8,8 @@
 
 #include "DatalinkCommandManager.hpp"
 #include "ExVectrLink/datalink/PacketTypes.hpp"
+#include "ExVectrNetwork/DataPacket.hpp"
+#include "ExVectrPackets/crsf/CRSFTypes.hpp"
 #include "FhssSetup.hpp"
 
 namespace VCTR::ExVectrLink {
@@ -40,6 +42,24 @@ uint8_t crsfPowerIndex(int8_t dbm) {
     return 6; // 2000 mW
   }
   return 0;
+}
+
+// CRSF device addresses relevant to the parameter/command protocol (see
+// extern/CRSF details.md, "Device Addresses").
+constexpr uint8_t CRSF_ADDRESS_BROADCAST = 0x00;
+constexpr uint8_t CRSF_ADDRESS_RADIO_TRANSMITTER = 0xEA; // the radio/handset
+constexpr uint8_t CRSF_ADDRESS_CRSF_TRANSMITTER =
+    0xEE; // R/C Transmitter Module / Crossfire Tx -- this device.
+constexpr uint8_t CRSF_ADDRESS_ELRS_LUA = 0xEF; // the ELRS handset Lua script
+
+// Chooses the destination address to answer a parameter request to. Mirrors
+// ExpressLRS's TXModuleEndpoint "dodgy hack": once the ELRS Lua recognises us
+// as a native ELRS TX it addresses its reads/writes from 0xEF, but EdgeTX
+// only routes a reply back to the script if it is addressed to the radio
+// (0xEA) -- so remap 0xEF -> 0xEA. Any other origin is answered directly.
+uint8_t replyDestForOrigin(uint8_t origin) {
+  return (origin == CRSF_ADDRESS_ELRS_LUA) ? CRSF_ADDRESS_RADIO_TRANSMITTER
+                                           : origin;
 }
 
 } // namespace
@@ -115,12 +135,38 @@ void CRSFRcInput::taskThread() {
   // Drain every queued frame each tick: forward RC channels, discard
   // anything else so it can never wedge behind an unrelated frame type.
   while (crsf_.peekFrameType() != 0) {
-    if (crsf_.peekFrameType() == static_cast<uint8_t>(
-                                     VCTR::packets::crsf::CRSFFrameType::RcChannelsPacked)) {
+    const uint8_t frameType = crsf_.peekFrameType();
+
+    if (frameType == static_cast<uint8_t>(
+                          VCTR::packets::crsf::CRSFFrameType::RcChannelsPacked)) {
       CRSF::ReceivedPacket<VCTR::packets::crsf::CRSFPacket_RcChannelsPacked>
           received;
       if (crsf_.read(received)) {
         forwardRcChannels(received.packet);
+        continue;
+      }
+    } else if (frameType == static_cast<uint8_t>(
+                                 VCTR::packets::crsf::CRSFFrameType::ParameterPing)) {
+      CRSF::ReceivedPacket<VCTR::packets::crsf::CRSFPacket_ParameterPing>
+          received;
+      if (crsf_.read(received)) {
+        handleParameterPing(received.packet);
+        continue;
+      }
+    } else if (frameType == static_cast<uint8_t>(
+                                 VCTR::packets::crsf::CRSFFrameType::ParameterRead)) {
+      CRSF::ReceivedPacket<VCTR::packets::crsf::CRSFPacket_ParameterRead>
+          received;
+      if (crsf_.read(received)) {
+        handleParameterRead(received.packet);
+        continue;
+      }
+    } else if (frameType == static_cast<uint8_t>(
+                                 VCTR::packets::crsf::CRSFFrameType::ParameterWrite)) {
+      CRSF::ReceivedPacket<VCTR::packets::crsf::CRSFPacket_ParameterWrite>
+          received;
+      if (crsf_.read(received)) {
+        handleParameterWrite(received.packet);
         continue;
       }
     }
@@ -156,6 +202,134 @@ void CRSFRcInput::writeLinkStatsFrame() {
   pkt.downSnr = (int8_t)radio.getPacketSNR();
 
   sendTelemetry(pkt);
+}
+
+void CRSFRcInput::handleParameterPing(
+    const VCTR::packets::crsf::CRSFPacket_ParameterPing &ping) {
+  // Only reply if this ping is for us (or everyone) -- mirrors ExpressLRS's
+  // device.reply-to-ping behaviour (see extern/CRSF details.md, "0x28
+  // Parameter Ping Devices").
+  if (ping.destAddress != CRSF_ADDRESS_BROADCAST &&
+      ping.destAddress != CRSF_ADDRESS_CRSF_TRANSMITTER) {
+    return;
+  }
+  VCTR::packets::crsf::CRSFPacket_ParameterDeviceInfo info;
+  info.destAddress = replyDestForOrigin(ping.origAddress);
+  sendTelemetry(info);
+}
+
+void CRSFRcInput::handleParameterRead(
+    const VCTR::packets::crsf::CRSFPacket_ParameterRead &req) {
+  if (req.parameterNumber != kBindParameterNumber) {
+    // Only one parameter exposed -- see extern/CRSF details.md's Chunks
+    // note: hosts fall back to requesting from parameter 1 onward when the
+    // device doesn't answer for parameter 0 (root folder).
+    return;
+  }
+  // Reading a COMMAND parameter resets it to idle -- mirrors ExpressLRS's
+  // CRSFEndpoint::parameterUpdateReq() (READ of a CRSF_COMMAND, chunk 0,
+  // sets step=lcsIdle, info=""), so re-opening the menu always shows the
+  // Bind command ready rather than stuck mid-run.
+  if (req.chunkNumber == 0) {
+    bindStep_ = VCTR::packets::crsf::CRSFCommandStep::Ready;
+    bindInfo_[0] = '\0';
+  }
+  sendBindEntry(bindStep_, bindInfo_, replyDestForOrigin(req.origAddress));
+}
+
+void CRSFRcInput::handleParameterWrite(
+    const VCTR::packets::crsf::CRSFPacket_ParameterWrite &req) {
+  using VCTR::packets::crsf::CRSFCommandStep;
+
+  const uint8_t replyDest = replyDestForOrigin(req.origAddress);
+
+  // Parameter 0 is the ELRS Lua's special "link statistics request": it
+  // writes param 0 roughly once a second expecting a 0x2E ELRS status frame
+  // back to drive the good/bad packet counter and the connection icon in its
+  // title bar. Mirrors ExpressLRS's TXModuleEndpoint special-case.
+  if (req.parameterNumber == 0) {
+    sendElrsStatus(replyDest);
+    return;
+  }
+
+  if (req.parameterNumber != kBindParameterNumber) {
+    return;
+  }
+
+  const int64_t nowNs = Core::NowNs();
+
+  if (req.commandStatus < static_cast<uint8_t>(CRSFCommandStep::Cancel)) {
+    // Click (and anything short of Cancel/Poll) executes immediately, same
+    // as ExpressLRS's handleSimpleSendCmd() for its "Bind" command -- no
+    // confirmation step. Unlike a real RF bind, "executing" here just means
+    // relaying a one-shot trigger to the RX so it enters WiFi upload mode.
+    lastBindClickNs_ = nowNs;
+    bindStep_ = CRSFCommandStep::Progress;
+    strncpy(bindInfo_, "WiFi Upload...", sizeof(bindInfo_) - 1);
+    bindInfo_[sizeof(bindInfo_) - 1] = '\0';
+    triggerRxWifiUpload();
+    sendBindEntry(bindStep_, bindInfo_, replyDest);
+  } else if (req.commandStatus == static_cast<uint8_t>(CRSFCommandStep::Cancel) ||
+             (nowNs - lastBindClickNs_) > kBindStatusTimeoutNs) {
+    bindStep_ = CRSFCommandStep::Ready;
+    bindInfo_[0] = '\0';
+    sendBindEntry(bindStep_, bindInfo_, replyDest);
+  }
+  // else: still executing (Poll) and not timed out yet -- send nothing, same
+  // as ExpressLRS: the handset keeps polling until it gets an Idle reply or
+  // its own local timeout expires.
+}
+
+void CRSFRcInput::sendElrsStatus(uint8_t destAddress) {
+  const auto &fhss = ExVectrLink::datalink::getFhss();
+  const auto &remote = ExVectrLink::datalink::getRemoteLinkStats();
+
+  VCTR::packets::crsf::CRSFPacket_ElrsStatus pkt;
+  pkt.destAddress = destAddress;
+
+  // Present downlink link quality as a good/bad split out of 100 -- the ELRS
+  // Lua just prints "bad/good" verbatim in its title bar, so this reads as a
+  // familiar percentage there without needing real per-frame CRSF counters.
+  int lq = (int)(fhss.getLinkQuality() * 100.0f + 0.5f);
+  if (lq < 0) {
+    lq = 0;
+  } else if (lq > 100) {
+    lq = 100;
+  }
+  pkt.pktsGood = (uint16_t)lq;
+  pkt.pktsBad = (uint8_t)(100 - lq);
+  // Bit 0 = LUA_FLAG_CONNECTED -> the "C" (vs "-") icon. Treat "connected" as
+  // having a currently-valid link telemetry read from the far end.
+  pkt.flags = remote.valid ? 0x01 : 0x00;
+  pkt.info[0] = '\0';
+
+  sendTelemetry(pkt);
+}
+
+void CRSFRcInput::sendBindEntry(VCTR::packets::crsf::CRSFCommandStep status,
+                                const char *info, uint8_t destAddress) {
+  VCTR::packets::crsf::CRSFPacket_ParameterSettingsEntryCommand entry;
+  entry.destAddress = destAddress;
+  entry.parameterNumber = kBindParameterNumber;
+  entry.status = static_cast<uint8_t>(status);
+  strncpy(entry.info, info, sizeof(entry.info) - 1);
+  entry.info[sizeof(entry.info) - 1] = '\0';
+  sendTelemetry(entry);
+}
+
+void CRSFRcInput::triggerRxWifiUpload() {
+  // One-shot trigger relayed over the FHSS OTA link -- the RX side already
+  // enters WiFi upload mode on receiving this (see DatalinkCommandManager's
+  // PacketTypes::UploadMode handling). Queued (rather than a direct
+  // transmitDataframe()) so it shares the single-slot channel with the rest
+  // of the OTA senders and gets retried if the channel is momentarily busy;
+  // safe to coalesce since UploadModeTrigger only ever carries this one
+  // message.
+  VCTR::network::DataPacket pkt;
+  pkt.payload.append(
+      (uint8_t)ExVectrLink::datalink::PacketTypes::UploadMode);
+  ExVectrLink::datalink::queueOtaPacket(
+      ExVectrLink::datalink::OtaSendKey::UploadModeTrigger, pkt);
 }
 
 void CRSFRcInput::registerTelemetryForwarding() {

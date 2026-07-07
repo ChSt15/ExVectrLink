@@ -70,6 +70,38 @@ private:
   void forwardRcChannels(
       const VCTR::packets::crsf::CRSFPacket_RcChannelsPacked &pkt);
 
+  // ── CRSF parameter/command protocol (handset Lua config menu) ──
+  // Exposes a single CRSF COMMAND parameter, "Bind", that the standard
+  // ELRS/EdgeTX Lua config screen can list and execute. Unlike a real
+  // ExpressLRS bind, executing it just relays a one-shot OTA trigger to the
+  // far end (see DatalinkCommandManager's PacketTypes::UploadMode handling)
+  // to make the RX enter WiFi firmware-upload mode. See TXModuleParameters.cpp
+  // in extern/ExpressLRS-master for the reference command-parameter state
+  // machine this mirrors (handleSimpleSendCmd()).
+  static constexpr uint8_t kBindParameterNumber = 1;
+  // Mirrors ExpressLRS's handleSimpleSendCmd() 2 s auto-revert-to-idle so a
+  // lost/never-polled-again command doesn't leave the Lua entry stuck
+  // showing "executing" forever.
+  static constexpr int64_t kBindStatusTimeoutNs = 2000 * Core::MILLISECONDS;
+
+  VCTR::packets::crsf::CRSFCommandStep bindStep_ =
+      VCTR::packets::crsf::CRSFCommandStep::Ready;
+  char bindInfo_[32] = "";
+  int64_t lastBindClickNs_ = 0;
+
+  void handleParameterPing(
+      const VCTR::packets::crsf::CRSFPacket_ParameterPing &ping);
+  void handleParameterRead(
+      const VCTR::packets::crsf::CRSFPacket_ParameterRead &req);
+  void handleParameterWrite(
+      const VCTR::packets::crsf::CRSFPacket_ParameterWrite &req);
+  void sendBindEntry(VCTR::packets::crsf::CRSFCommandStep status,
+                     const char *info, uint8_t destAddress);
+  // Sends a CRSF 0x2E ELRS-status frame (good/bad packet counter + connection
+  // flag) in response to the ELRS Lua's periodic parameter-0 link-stat poll.
+  void sendElrsStatus(uint8_t destAddress);
+  void triggerRxWifiUpload();
+
   // ── FC -> handset telemetry relay ──
   // Decodes VCTR::packets::telecoms Telemetry_* packets out of the FHSS
   // downlink's raw PacketTypes::Data payloads; see

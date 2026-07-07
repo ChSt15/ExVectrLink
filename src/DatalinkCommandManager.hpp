@@ -37,6 +37,10 @@ enum class OtaSendKey : uint8_t {
   CrsfGpsPosition, ///< CRSFRcOutput: FC GPS latitude/longitude relay --
                    ///< manually split from CrsfGpsStats since both
                    ///< together don't fit in one OTA frame.
+  UploadModeTrigger, ///< CRSFRcInput: one-shot "enter WiFi upload mode"
+                     ///< command relayed to the far end (see PacketTypes::
+                     ///< UploadMode). Only ever carries this single message,
+                     ///< so coalescing repeated clicks is harmless.
 };
 
 extern void

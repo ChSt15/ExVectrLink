@@ -491,6 +491,9 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
 
       rxDesyncCount = remDesyncCount;
       rxPacketRateHz = remPacketRateHz;
+      rxPacketRateHz = remPacketRateHz;
+      rxPacketRateHz = remPacketRateHz;
+      rxPacketRateHz = remPacketRateHz;
       rxPacketQuality = remPacketQuality;
       rxCrsfTxFailures = remCrsfTxFailures;
     } else if (pktType == (uint8_t)PacketTypes::UploadMode) {
