@@ -77,6 +77,12 @@ private:
   VCTR::packets::PacketManager telemetryPacketManager_;
   void registerTelemetryForwarding();
 
+  // GPS arrives as two independently-timed packets (stats and position --
+  // see registerTelemetryForwarding()); this holds the latest of each so
+  // every send to the handset carries the freshest known values for both,
+  // even though only one half updates at a time.
+  VCTR::packets::crsf::CRSFPacket_GPS gpsCache_{};
+
   /**
    * @brief Registers a conversion from an incoming ExVectrPackets telemetry
    * type to a CRSF telemetry frame: whenever `SourceT` is decoded out of

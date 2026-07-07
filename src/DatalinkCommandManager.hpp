@@ -3,6 +3,7 @@
 
 #include <cstdint>
 
+#include "ExVectrNetwork/DataPacket.hpp"
 #include "ExVectrNetwork/datalink/sx1280/Sx1280_2.hpp"
 
 #include "ExVectrLink/serial/SerialTelecoms.hpp"
@@ -20,8 +21,37 @@ struct RemoteLinkStats {
   bool valid = false;
 };
 
+/// Identifies an independent OTA sender for queueOtaPacket()'s coalescing
+/// queue -- each key gets its own slot in the queue, always updated with
+/// the freshest data rather than falling behind, and shares the underlying
+/// single-slot FHSS channel fairly with every other key. Add a new value
+/// here for each new independent thing that needs to be sent over the air,
+/// including each individually-sent piece of one logically larger packet
+/// that's been manually split because it doesn't fit in a single OTA frame.
+enum class OtaSendKey : uint8_t {
+  RcChannels,        ///< CRSFRcInput: handset RC channels, ground -> FC.
+  LinkTelemetry,     ///< DatalinkCommandManager: compact link stats.
+  RxState,           ///< DatalinkCommandManager: desync/rate diagnostics.
+  CrsfBatterySensor, ///< CRSFRcOutput: FC battery telemetry relay.
+  CrsfGpsStats,    ///< CRSFRcOutput: FC GPS speed/satellites/altitude relay.
+  CrsfGpsPosition, ///< CRSFRcOutput: FC GPS latitude/longitude relay --
+                   ///< manually split from CrsfGpsStats since both
+                   ///< together don't fit in one OTA frame.
+};
+
 extern void
 initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms);
+
+/// Queues `packet` for transmission over the FHSS OTA link, coalesced by
+/// `key` (see OtaSendKey/OtaPacketQueue) so independent senders share the
+/// single-slot channel without racing to overwrite each other's pending
+/// frame. Use this instead of calling getFhss().transmitDataframe()
+/// directly for anything that represents an ongoing state (as opposed to a
+/// one-off message, which should still go straight to transmitDataframe()
+/// since coalescing would silently drop it if another update for the same
+/// key arrives before it's sent).
+/// @return false only if `key` is new and the internal queue is full.
+bool queueOtaPacket(OtaSendKey key, const VCTR::network::DataPacket &packet);
 
 /// Returns the TX power (dBm) currently configured on this node.
 int8_t getLocalTxPowerdBm();

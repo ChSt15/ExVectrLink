@@ -13,6 +13,7 @@
 #include "ExVectrPackets/radiolink/packets/RadioLinkPackets.hpp"
 
 #include "CRSF.hpp"
+#include "DatalinkCommandManager.hpp"
 
 namespace VCTR::ExVectrLink {
 
@@ -72,16 +73,32 @@ private:
    * @brief Registers a conversion from a CRSF telemetry frame type to an
    * ExVectrPackets telemetry type: whenever `CrsfT` is the next queued
    * frame read off the FC's CRSF wire, `convert` is applied and the result
-   * sent over the FHSS downlink. This is the one place new FC->ground
-   * telemetry types need to hook into.
+   * queued for the FHSS downlink under `key` (see
+   * DatalinkCommandManager.hpp's OtaSendKey/queueOtaPacket()). This is the
+   * one place new FC->ground telemetry types need to hook into.
    */
   template <VCTR::packets::IsPacket CrsfT, VCTR::packets::IsPacket ExVectrT>
-  void forwardCrsfTelemetry(std::function<ExVectrT(const CrsfT &)> convert);
+  void forwardCrsfTelemetry(datalink::OtaSendKey key,
+                            std::function<ExVectrT(const CrsfT &)> convert);
 
-  /// Serializes `packet`, tags it PacketTypes::Data, and sends it over the
-  /// FHSS downlink -- same tagging CRSFRcInput's RC-channel uplink and
-  /// DatalinkCommandManager's generic Data forwarding use.
-  template <VCTR::packets::IsPacket T> void sendOverFhss(const T &packet);
+  /**
+   * @brief Like forwardCrsfTelemetry() above, but for a CRSF frame that
+   * needs to become more than one OTA packet (e.g. GPS position doesn't fit
+   * in the same frame as the rest of the GPS fields, so it's manually split
+   * into two independently-keyed sends). `handle` is called with the
+   * decoded `CrsfT` and is expected to call sendOverFhss() itself, once per
+   * piece, each under its own OtaSendKey.
+   */
+  template <VCTR::packets::IsPacket CrsfT>
+  void forwardCrsfTelemetry(std::function<void(const CrsfT &)> handle);
+
+  /// Serializes `packet`, tags it PacketTypes::Data, and queues it for the
+  /// FHSS downlink under `key` via DatalinkCommandManager's shared
+  /// coalescing send queue -- same path CRSFRcInput's RC-channel uplink and
+  /// DatalinkCommandManager's own link-stats sends use, so none of them
+  /// race to overwrite each other's pending frame.
+  template <VCTR::packets::IsPacket T>
+  void sendOverFhss(datalink::OtaSendKey key, const T &packet);
 
 public:
   /**

@@ -10,6 +10,8 @@
 #include "DiversitySetup.hpp"
 #include "DynamicPowerSetup.hpp"
 #include "FhssSetup.hpp"
+#include "OtaPacketQueue.hpp"
+#include "WifiUpload.hpp"
 
 #if defined(ENABLE_CRSF)
 #include "CRSFRcOutput.hpp"
@@ -67,6 +69,51 @@ uint8_t getRemotePacketQuality() { return rxPacketQuality; }
 uint16_t getRemoteCrsfTxFailureRateHz() { return rxCrsfTxFailures; }
 
 uint16_t getRemoteRcPacketRateHz() { return rxPacketRateHz; }
+
+// ---------------------------------------------------------------------------
+// Shared outgoing OTA queue -- see OtaPacketQueue.hpp / OtaSendKey. Every
+// independent state-like sender (RC channels, link stats, telemetry relay,
+// ...) queues through here instead of calling getFhss().transmitDataframe()
+// directly, so they share the single-slot channel instead of racing to
+// overwrite each other's pending frame.
+// ---------------------------------------------------------------------------
+
+static OtaPacketQueue<8> otaSendQueue;
+
+bool queueOtaPacket(OtaSendKey key, const VCTR::network::DataPacket &packet) {
+  return otaSendQueue.updateQueue((uint8_t)key, packet);
+}
+
+class OtaQueuePump : public VCTR::Core::Task_Periodic {
+public:
+  OtaQueuePump() : Task_Periodic("OtaQueuePump", 2 * Core::MILLISECONDS) {
+    VCTR::Core::getSystemScheduler().addTask(*this);
+  }
+
+  void taskCheck() override {
+    // Wake early the moment there's both something queued and a free slot
+    // to put it in, rather than waiting for the next periodic tick.
+    if (!otaSendQueue.isEmpty() && !getFhss().isChannelBlocked()) {
+      setDeadline(Core::NowNs());
+    }
+  }
+
+  void taskThread() override {
+    if (getFhss().isChannelBlocked()) {
+      return; // Previous frame hasn't gone out over the air yet.
+    }
+    uint8_t key;
+    network::DataPacket packet;
+    if (!otaSendQueue.dequeue(key, packet)) {
+      return; // Nothing queued.
+    }
+    if (!getFhss().transmitDataframe(packet)) {
+      // Shouldn't normally happen right after isChannelBlocked() said
+      // clear, but don't lose the packet if it does.
+      otaSendQueue.updateQueue(key, packet);
+    }
+  }
+} otaQueuePump;
 
 static uint8_t quantizeLinkQualityPercent(float lq);
 
@@ -278,7 +325,7 @@ public:
       otaPkt.payload.append(payload[i]);
     }
     otaPkt.payload.append((uint8_t)PacketTypes::LinkTelemetry);
-    getFhss().transmitDataframe(otaPkt);
+    queueOtaPacket(OtaSendKey::LinkTelemetry, otaPkt);
   }
 
   void sendRxStatePacket() {
@@ -293,7 +340,7 @@ public:
       otaPkt.payload.append(payload[i]);
     }
     otaPkt.payload.append((uint8_t)PacketTypes::RxState);
-    getFhss().transmitDataframe(otaPkt);
+    queueOtaPacket(OtaSendKey::RxState, otaPkt);
   }
 
 } linkInfoSender;
@@ -446,6 +493,9 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
       rxPacketRateHz = remPacketRateHz;
       rxPacketQuality = remPacketQuality;
       rxCrsfTxFailures = remCrsfTxFailures;
+    } else if (pktType == (uint8_t)PacketTypes::UploadMode) {
+      // OTA upload mode packet -- forward to serial host.
+      VCTR::WifiUpload::startWiFiUploadMode();
     }
     // Other types are silently ignored for now.
   });

@@ -152,34 +152,49 @@ void CRSFRcOutput::taskThread() {
 
 template <VCTR::packets::IsPacket CrsfT, VCTR::packets::IsPacket ExVectrT>
 void CRSFRcOutput::forwardCrsfTelemetry(
-    std::function<ExVectrT(const CrsfT &)> convert) {
-  crsfTelemetryHandlers_.append([this, convert](CRSF &crsf) -> bool {
+    datalink::OtaSendKey key, std::function<ExVectrT(const CrsfT &)> convert) {
+  crsfTelemetryHandlers_.append([this, key, convert](CRSF &crsf) -> bool {
     CRSF::ReceivedPacket<CrsfT> received;
     if (!crsf.read(received)) {
       return false;
     }
-    sendOverFhss(convert(received.packet));
+    sendOverFhss(key, convert(received.packet));
+    return true;
+  });
+}
+
+template <VCTR::packets::IsPacket CrsfT>
+void CRSFRcOutput::forwardCrsfTelemetry(
+    std::function<void(const CrsfT &)> handle) {
+  crsfTelemetryHandlers_.append([handle](CRSF &crsf) -> bool {
+    CRSF::ReceivedPacket<CrsfT> received;
+    if (!crsf.read(received)) {
+      return false;
+    }
+    handle(received.packet);
     return true;
   });
 }
 
 template <VCTR::packets::IsPacket T>
-void CRSFRcOutput::sendOverFhss(const T &packet) {
+void CRSFRcOutput::sendOverFhss(datalink::OtaSendKey key, const T &packet) {
   VCTR::network::DataPacket otaPkt;
   otaPkt.payload.setSize(packet.numBytes() + 1);
   packet.serialize(otaPkt.payload.getPtr());
   otaPkt.payload[packet.numBytes()] =
       (uint8_t)ExVectrLink::datalink::PacketTypes::Data;
-  ExVectrLink::datalink::getFhss().transmitDataframe(otaPkt);
+  ExVectrLink::datalink::queueOtaPacket(key, otaPkt);
 }
 
 void CRSFRcOutput::registerCrsfTelemetryForwarding() {
   // Every FC -> ground telemetry type is wired up the same way: read it off
-  // the FC's CRSF wire, convert to the matching ExVectrPackets type, send
-  // over FHSS. Adding a new telemetry source is one more
-  // forwardCrsfTelemetry<>() call -- nothing else here needs to change.
+  // the FC's CRSF wire, convert to the matching ExVectrPackets type, queue
+  // it for the FHSS downlink under its own OtaSendKey. Adding a new
+  // telemetry source is one more forwardCrsfTelemetry<>() call (plus a new
+  // OtaSendKey value) -- nothing else here needs to change.
   forwardCrsfTelemetry<VCTR::packets::crsf::CRSFPacket_BatterySensor,
                       VCTR::packets::telecoms::Telemetry_Battery>(
+      datalink::OtaSendKey::CrsfBatterySensor,
       [](const VCTR::packets::crsf::CRSFPacket_BatterySensor &c) {
         VCTR::packets::telecoms::Telemetry_Battery t;
         t.voltage = c.voltage;
@@ -187,13 +202,21 @@ void CRSFRcOutput::registerCrsfTelemetryForwarding() {
         return t;
       });
 
-  forwardCrsfTelemetry<VCTR::packets::crsf::CRSFPacket_GPS,
-                      VCTR::packets::telecoms::Telemetry_GNSS>(
-      [](const VCTR::packets::crsf::CRSFPacket_GPS &c) {
-        VCTR::packets::telecoms::Telemetry_GNSS t;
-        t.speed = (uint16_t)c.groundspeedKmh;
-        t.satellites = c.satellites;
-        return t;
+  // GPS is manually split into two OTA sends: latitude+longitude alone
+  // already fill an OTA frame, so the remaining fields (speed, satellites,
+  // altitude) go out as a separate "stats" packet under its own key.
+  forwardCrsfTelemetry<VCTR::packets::crsf::CRSFPacket_GPS>(
+      [this](const VCTR::packets::crsf::CRSFPacket_GPS &c) {
+        VCTR::packets::telecoms::Telemetry_GNSS stats;
+        stats.speed = (uint16_t)c.groundspeedKmh;
+        stats.satellites = c.satellites;
+        stats.altitudeM = (int16_t)c.altitudeM;
+        sendOverFhss(datalink::OtaSendKey::CrsfGpsStats, stats);
+
+        VCTR::packets::telecoms::Telemetry_GNSSPosition position;
+        position.latitude = c.latitude;
+        position.longitude = c.longitude;
+        sendOverFhss(datalink::OtaSendKey::CrsfGpsPosition, position);
       });
 }
 

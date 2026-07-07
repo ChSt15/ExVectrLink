@@ -176,15 +176,27 @@ void CRSFRcInput::registerTelemetryForwarding() {
         return pkt;
       });
 
-  forwardTelemetry<VCTR::packets::telecoms::Telemetry_GNSS,
-                   VCTR::packets::crsf::CRSFPacket_GPS>(
-      [](const VCTR::packets::telecoms::Telemetry_GNSS &t) {
-        VCTR::packets::crsf::CRSFPacket_GPS pkt;
-        pkt.groundspeedKmh = (float)t.speed;
-        pkt.satellites = t.satellites;
-        // Telemetry_GNSS doesn't carry position/heading/altitude (kept
-        // compact for the OTA link) -- left at their zero defaults.
-        return pkt;
+  // GPS arrives as two independently-timed OTA packets (see
+  // CRSFRcOutput::registerCrsfTelemetryForwarding() -- position doesn't fit
+  // in the same frame as the rest of the GPS fields), so instead of
+  // forwardTelemetry<>()'s stateless 1:1 conversion, each one updates its
+  // own fields of a persistent gpsCache_ and re-sends the combined packet,
+  // always carrying whichever of position/stats was most recently heard.
+  telemetryPacketManager_
+      .addPacketReceiveHandler<VCTR::packets::telecoms::Telemetry_GNSS>(
+          [this](const VCTR::packets::telecoms::Telemetry_GNSS &t) {
+            gpsCache_.groundspeedKmh = (float)t.speed;
+            gpsCache_.satellites = t.satellites;
+            gpsCache_.altitudeM = (float)t.altitudeM;
+            sendTelemetry(gpsCache_);
+          });
+
+  telemetryPacketManager_.addPacketReceiveHandler<
+      VCTR::packets::telecoms::Telemetry_GNSSPosition>(
+      [this](const VCTR::packets::telecoms::Telemetry_GNSSPosition &t) {
+        gpsCache_.latitude = t.latitude;
+        gpsCache_.longitude = t.longitude;
+        sendTelemetry(gpsCache_);
       });
 
   // Feed every FHSS downlink PacketTypes::Data payload into the telemetry
@@ -255,13 +267,16 @@ void CRSFRcInput::forwardRcChannels(
   // Forward straight to the FHSS uplink, tagged the same way SerialTelecoms'
   // PacketData handler does it (see DatalinkCommandManager.cpp), so the
   // receive side (CRSFRcOutput) doesn't need to know or care whether the RC
-  // data came from CRSF or a serial host app.
+  // data came from CRSF or a serial host app. Queued (not sent directly) so
+  // it shares the single-slot channel with link stats/telemetry instead of
+  // racing to overwrite whichever of them is currently pending.
   VCTR::network::DataPacket otaPkt;
   otaPkt.payload.setSize(packet.numBytes() + 1);
   packet.serialize(otaPkt.payload.getPtr());
   otaPkt.payload[packet.numBytes()] =
       (uint8_t)ExVectrLink::datalink::PacketTypes::Data;
-  ExVectrLink::datalink::getFhss().transmitDataframe(otaPkt);
+  ExVectrLink::datalink::queueOtaPacket(
+      ExVectrLink::datalink::OtaSendKey::RcChannels, otaPkt);
 }
 
 } // namespace VCTR::ExVectrLink
