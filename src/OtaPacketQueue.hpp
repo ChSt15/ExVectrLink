@@ -42,6 +42,24 @@ public:
     return entries_.placeBack(Entry{key, packet});
   }
 
+  /// Same as updateQueue(), except a new (not-yet-queued) entry is inserted
+  /// at the FRONT instead of the back, so it becomes the very next entry
+  /// dequeue() returns -- for latency-sensitive senders that must not wait
+  /// behind whatever backlog of lower-priority keys is already queued. An
+  /// entry that's already queued is still just overwritten in place (not
+  /// re-prioritized) so a fast-changing source doesn't jump the queue on
+  /// every update, only on its first entry into it.
+  /// @return false only if `key` is new and the queue is already full.
+  bool updateQueueFront(uint8_t key, const network::DataPacket &packet) {
+    for (size_t i = 0; i < entries_.size(); i++) {
+      if (entries_[i].key == key) {
+        entries_[i].packet = packet;
+        return true;
+      }
+    }
+    return entries_.placeFront(Entry{key, packet});
+  }
+
   /// Removes and returns the oldest queued entry.
   /// @return false if the queue was empty (`key`/`packet` left untouched).
   bool dequeue(uint8_t &key, network::DataPacket &packet) {

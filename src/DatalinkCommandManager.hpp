@@ -60,6 +60,16 @@ initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms);
 /// @return false only if `key` is new and the internal queue is full.
 bool queueOtaPacket(OtaSendKey key, const VCTR::network::DataPacket &packet);
 
+/// Same as queueOtaPacket(), but a new (not-yet-queued) entry is inserted at
+/// the FRONT of the shared queue instead of the back, so `key` jumps ahead of
+/// any backlog of lower-priority keys already waiting. For senders whose data
+/// goes stale quickly and must not be held up behind that backlog -- e.g. the
+/// link statistics telemetry the dynamic-power loop depends on for both ends
+/// of the link.
+/// @return false only if `key` is new and the internal queue is full.
+bool queueOtaPacketFront(OtaSendKey key,
+                         const VCTR::network::DataPacket &packet);
+
 /// Returns the TX power (dBm) currently configured on this node.
 int8_t getLocalTxPowerdBm();
 

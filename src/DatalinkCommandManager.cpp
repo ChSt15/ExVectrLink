@@ -103,6 +103,11 @@ bool queueOtaPacket(OtaSendKey key, const VCTR::network::DataPacket &packet) {
   return otaSendQueue.updateQueue((uint8_t)key, packet);
 }
 
+bool queueOtaPacketFront(OtaSendKey key,
+                         const VCTR::network::DataPacket &packet) {
+  return otaSendQueue.updateQueueFront((uint8_t)key, packet);
+}
+
 class OtaQueuePump : public VCTR::Core::Task_Periodic {
 public:
   OtaQueuePump() : Task_Periodic("OtaQueuePump", 2 * Core::MILLISECONDS) {
@@ -300,11 +305,22 @@ static uint8_t getLocalTxAntennaIndex() {
 
 class LinkInfoSender : public VCTR::Core::Task_Periodic {
 
+  int64_t lastLinkTelemetrySendTime = 0;
   int64_t lastRxStatePacketSendTime = 0;
 
+  // LinkTelemetry carries the RSSI/SNR/LQ that the far end's dynamic-power
+  // loop (see updateDynamicPowerFromRemoteLinkInfo()) depends on, so it's
+  // timed independently of -- and sent at a fixed 2 Hz regardless of --
+  // RxState/SlotStats below, and queued via queueOtaPacketFront() so it
+  // jumps ahead of any backlog of lower-priority OTA traffic (CRSF sensor
+  // relay, RC channels, ...) instead of going stale behind it.
+  static constexpr int64_t kLinkTelemetryIntervalNs = 500 * Core::MILLISECONDS;
+  static constexpr int64_t kRxStateIntervalNs = 1000 * Core::MILLISECONDS;
+
 public:
-  // Run at 4 Hz (every 250 ms).
-  LinkInfoSender() : Task_Periodic("LinkInfoSender", 200 * Core::MILLISECONDS) {
+  // Ticks well inside the 500 ms LinkTelemetry period so each stream's
+  // deadline below is hit with low jitter.
+  LinkInfoSender() : Task_Periodic("LinkInfoSender", 50 * Core::MILLISECONDS) {
     VCTR::Core::getSystemScheduler().addTask(*this);
   }
 
@@ -314,14 +330,17 @@ public:
       return;
     }
 
-    if (Core::NowNs() - lastRxStatePacketSendTime > 1000 * Core::MILLISECONDS) {
-      lastRxStatePacketSendTime = Core::NowNs();
-      // Both the RxState debug packet and the SlotStats missed-slot counter
-      // go out once per second; LinkTelemetry fills the gaps in between.
+    const int64_t now = Core::NowNs();
+
+    if (now - lastLinkTelemetrySendTime > kLinkTelemetryIntervalNs) {
+      lastLinkTelemetrySendTime = now;
+      sendLinkTelemetryPacket();
+    }
+
+    if (now - lastRxStatePacketSendTime > kRxStateIntervalNs) {
+      lastRxStatePacketSendTime = now;
       sendRxStatePacket();
       sendSlotStatsPacket();
-    } else {
-      sendLinkTelemetryPacket();
     }
   }
 
@@ -382,7 +401,7 @@ public:
       otaPkt.payload.append(payload[i]);
     }
     otaPkt.payload.append((uint8_t)PacketTypes::LinkTelemetry);
-    queueOtaPacket(OtaSendKey::LinkTelemetry, otaPkt);
+    queueOtaPacketFront(OtaSendKey::LinkTelemetry, otaPkt);
   }
 
   void sendRxStatePacket() {
