@@ -26,6 +26,15 @@ using namespace VCTR::ExVectrLink::packets;
 uint8_t packetNumber = 0;
 
 int32_t rxDesyncCount = 0;
+// Debug diagnostics decoded from the far end's RxState packet (see
+// encodeRxState/decodeRxState) and surfaced on the TX-side Lua menu.
+uint16_t rxRuntimeMinutes = 0;
+int16_t rxFhssOffsetUs = 0;
+int16_t rxIntervalOffsetNs = 0;
+uint32_t rxMissedSlots = 0;
+// No longer carried in the RxState packet (dropped to make room for the debug
+// fields above -- the OTA frame only holds 8 data bytes). Kept so existing
+// consumers still compile; they now read a constant 0.
 uint16_t rxPacketRateHz = 0;
 uint8_t rxPacketQuality = 0;
 uint16_t rxCrsfTxFailures = 0;
@@ -69,6 +78,16 @@ uint8_t getRemotePacketQuality() { return rxPacketQuality; }
 uint16_t getRemoteCrsfTxFailureRateHz() { return rxCrsfTxFailures; }
 
 uint16_t getRemoteRcPacketRateHz() { return rxPacketRateHz; }
+
+uint16_t getRemoteDesyncCount() { return (uint16_t)rxDesyncCount; }
+
+uint16_t getRemoteRuntimeMinutes() { return rxRuntimeMinutes; }
+
+int16_t getRemoteFhssOffsetUs() { return rxFhssOffsetUs; }
+
+int16_t getRemoteIntervalOffsetNs() { return rxIntervalOffsetNs; }
+
+uint32_t getRemoteMissedSlots() { return rxMissedSlots; }
 
 // ---------------------------------------------------------------------------
 // Shared outgoing OTA queue -- see OtaPacketQueue.hpp / OtaSendKey. Every
@@ -214,26 +233,61 @@ static void decodeLinkInfo(const uint8_t in[5], uint8_t &antenna, float &lq,
   dynamicPower = (in[4] & 0x01) != 0;
 }
 
-static void encodeRxState(uint16_t desyncCount, uint16_t packetRateHz,
-                          uint8_t packetQuality, uint16_t crsfTxFailures,
+// The 8-byte OTA RxState payload -- far-end (RX-side) debug diagnostics shown
+// on the TX Lua menu. All four fields are 16-bit, filling the frame exactly:
+//   [0..1] desync count      [2..3] runtime (minutes)
+//   [4..5] FHSS offset (us)  [6..7] FHSS interval correction (ns)
+// FHSS offset / interval are signed; they saturate at the int16 range (the
+// interval correction can in theory reach ~1e5 ns, but is a few hundred ns in
+// normal operation).
+static int16_t clampToI16(int64_t v) {
+  if (v > INT16_MAX)
+    return INT16_MAX;
+  if (v < INT16_MIN)
+    return INT16_MIN;
+  return (int16_t)v;
+}
+
+static void encodeRxState(uint16_t desyncCount, uint16_t runtimeMinutes,
+                          int16_t fhssOffsetUs, int16_t intervalOffsetNs,
                           uint8_t out[8]) {
   out[0] = (uint8_t)(desyncCount & 0xFF);
   out[1] = (uint8_t)((desyncCount >> 8) & 0xFF);
-  out[2] = (uint8_t)(packetRateHz & 0xFF);
-  out[3] = (uint8_t)((packetRateHz >> 8) & 0xFF);
-  out[4] = packetQuality;
-  out[5] = (uint8_t)(crsfTxFailures & 0xFF);
-  out[6] = (uint8_t)((crsfTxFailures >> 8) & 0xFF);
-  out[7] = 0;
+  out[2] = (uint8_t)(runtimeMinutes & 0xFF);
+  out[3] = (uint8_t)((runtimeMinutes >> 8) & 0xFF);
+  out[4] = (uint8_t)((uint16_t)fhssOffsetUs & 0xFF);
+  out[5] = (uint8_t)(((uint16_t)fhssOffsetUs >> 8) & 0xFF);
+  out[6] = (uint8_t)((uint16_t)intervalOffsetNs & 0xFF);
+  out[7] = (uint8_t)(((uint16_t)intervalOffsetNs >> 8) & 0xFF);
 }
 
 static void decodeRxState(const uint8_t in[8], uint16_t &desyncCount,
-                          uint16_t &packetRateHz, uint8_t &packetQuality,
-                          uint16_t &crsfTxFailures) {
+                          uint16_t &runtimeMinutes, int16_t &fhssOffsetUs,
+                          int16_t &intervalOffsetNs) {
   desyncCount = (uint16_t)in[0] | ((uint16_t)in[1] << 8);
-  packetRateHz = (uint16_t)in[2] | ((uint16_t)in[3] << 8);
-  packetQuality = in[4];
-  crsfTxFailures = (uint16_t)in[5] | ((uint16_t)in[6] << 8);
+  runtimeMinutes = (uint16_t)in[2] | ((uint16_t)in[3] << 8);
+  fhssOffsetUs = (int16_t)((uint16_t)in[4] | ((uint16_t)in[5] << 8));
+  intervalOffsetNs = (int16_t)((uint16_t)in[6] | ((uint16_t)in[7] << 8));
+}
+
+// SlotStats OTA payload -- the far end's cumulative FHSS missed-slot counter
+// (scheduling latency, not RF loss). Only the first 4 bytes are used; the rest
+// are padded so the payload is the same 8-data + 1-type-byte length every
+// other OTA packet uses (the receive path reads the type from the last byte).
+static void encodeSlotStats(uint32_t missedSlots, uint8_t out[8]) {
+  out[0] = (uint8_t)(missedSlots & 0xFF);
+  out[1] = (uint8_t)((missedSlots >> 8) & 0xFF);
+  out[2] = (uint8_t)((missedSlots >> 16) & 0xFF);
+  out[3] = (uint8_t)((missedSlots >> 24) & 0xFF);
+  out[4] = 0;
+  out[5] = 0;
+  out[6] = 0;
+  out[7] = 0;
+}
+
+static void decodeSlotStats(const uint8_t in[8], uint32_t &missedSlots) {
+  missedSlots = (uint32_t)in[0] | ((uint32_t)in[1] << 8) |
+                ((uint32_t)in[2] << 16) | ((uint32_t)in[3] << 24);
 }
 
 static uint8_t getLocalTxAntennaIndex() {
@@ -262,7 +316,10 @@ public:
 
     if (Core::NowNs() - lastRxStatePacketSendTime > 1000 * Core::MILLISECONDS) {
       lastRxStatePacketSendTime = Core::NowNs();
+      // Both the RxState debug packet and the SlotStats missed-slot counter
+      // go out once per second; LinkTelemetry fills the gaps in between.
       sendRxStatePacket();
+      sendSlotStatsPacket();
     } else {
       sendLinkTelemetryPacket();
     }
@@ -330,10 +387,13 @@ public:
 
   void sendRxStatePacket() {
 
+    const uint16_t runtimeMinutes = (uint16_t)((millis() / 60000UL) & 0xFFFF);
+    const int16_t fhssOffsetUs = clampToI16(getFhss().getTimingOffset() / 1000);
+    const int16_t intervalOffsetNs = clampToI16(getFhss().getIntervalCorrection());
+
     uint8_t payload[8];
-    encodeRxState(getFhss().getDesyncCounter(), getLocalRcPacketRateHz(),
-                  getLocalPacketQualityPercent(), getLocalCrsfTxFailureRateHz(),
-                  payload);
+    encodeRxState((uint16_t)getFhss().getDesyncCounter(), runtimeMinutes,
+                  fhssOffsetUs, intervalOffsetNs, payload);
 
     network::DataPacket otaPkt;
     for (size_t i = 0; i < 8; i++) {
@@ -341,6 +401,18 @@ public:
     }
     otaPkt.payload.append((uint8_t)PacketTypes::RxState);
     queueOtaPacket(OtaSendKey::RxState, otaPkt);
+  }
+
+  void sendSlotStatsPacket() {
+    uint8_t payload[8];
+    encodeSlotStats(getFhss().getMissedSlotCounter(), payload);
+
+    network::DataPacket otaPkt;
+    for (size_t i = 0; i < 8; i++) {
+      otaPkt.payload.append(payload[i]);
+    }
+    otaPkt.payload.append((uint8_t)PacketTypes::SlotStats);
+    queueOtaPacket(OtaSendKey::SlotStats, otaPkt);
   }
 
 } linkInfoSender;
@@ -479,23 +551,24 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
 
     } else if (pktType == (uint8_t)PacketTypes::RxState) {
 
-      // Decode the 8-byte OTA RxState packet which carries the far end's
-      // desync count plus rate/quality diagnostics that do not fit in the
-      // compact LinkTelemetry packet.
+      // Decode the 8-byte OTA RxState packet: the far end's desync count plus
+      // the runtime / FHSS timing diagnostics shown on the TX Lua menu.
       uint16_t remDesyncCount;
-      uint16_t remPacketRateHz;
-      uint8_t remPacketQuality;
-      uint16_t remCrsfTxFailures;
-      decodeRxState(packet.payload.getPtr(), remDesyncCount, remPacketRateHz,
-                    remPacketQuality, remCrsfTxFailures);
+      uint16_t remRuntimeMinutes;
+      int16_t remFhssOffsetUs;
+      int16_t remIntervalOffsetNs;
+      decodeRxState(packet.payload.getPtr(), remDesyncCount, remRuntimeMinutes,
+                    remFhssOffsetUs, remIntervalOffsetNs);
 
       rxDesyncCount = remDesyncCount;
-      rxPacketRateHz = remPacketRateHz;
-      rxPacketRateHz = remPacketRateHz;
-      rxPacketRateHz = remPacketRateHz;
-      rxPacketRateHz = remPacketRateHz;
-      rxPacketQuality = remPacketQuality;
-      rxCrsfTxFailures = remCrsfTxFailures;
+      rxRuntimeMinutes = remRuntimeMinutes;
+      rxFhssOffsetUs = remFhssOffsetUs;
+      rxIntervalOffsetNs = remIntervalOffsetNs;
+    } else if (pktType == (uint8_t)PacketTypes::SlotStats) {
+      // Far end's FHSS missed-slot (scheduling-latency) counter.
+      uint32_t remMissedSlots;
+      decodeSlotStats(packet.payload.getPtr(), remMissedSlots);
+      rxMissedSlots = remMissedSlots;
     } else if (pktType == (uint8_t)PacketTypes::UploadMode) {
       // OTA upload mode packet -- forward to serial host.
       VCTR::WifiUpload::startWiFiUploadMode();

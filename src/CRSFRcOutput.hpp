@@ -36,8 +36,11 @@ uint16_t getCrsfTxFailureRateHz();
  * new telemetry type only needs a forwardCrsfTelemetry<>() call here plus a
  * matching forwardTelemetry<>() call in CRSFRcInput.
  *
- * Link statistics and bind-command detection are not yet ported -- see
- * CRSFOutput for the previous, still-complete implementation of those.
+ * Also sends a CRSF Link Statistics (0x14) frame to the FC at ~10 Hz so it
+ * can display uplink LQ/RSSI/SNR/TX-power (see writeLinkStatsFrame()) -- this
+ * is what drives the FC's link telemetry readouts. Bind-command detection
+ * (the FC/Betaflight "Bind" button) is not yet ported -- see CRSFOutput for
+ * the previous implementation of that.
  */
 class CRSFRcOutput : public Core::Task_Periodic {
 private:
@@ -56,9 +59,17 @@ private:
   int64_t lastPacketTime_ = 0;
   bool newRcPacket_ = false;
 
+  // Link-stats cadence to the FC. The FC only refreshes its LQ/RSSI/etc.
+  // readouts when it receives a 0x14 frame, so this is sent on its own timer
+  // (independent of RC-packet arrival) at roughly the same ~10 Hz CRSFOutput
+  // and CRSFRcInput use.
+  static constexpr int64_t LINK_STATS_INTERVAL_NS = 100 * Core::MILLISECONDS;
+  int64_t lastLinkStatsSendNs_ = 0;
+
   static uint16_t normToCrsf(int16_t val);
 
   void writeRcChannelsFrame();
+  void writeLinkStatsFrame();
 
   // ── FC -> ground telemetry relay ──
   // Each entry attempts to read one supported CRSF telemetry frame type off

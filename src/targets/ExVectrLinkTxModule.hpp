@@ -17,7 +17,7 @@ constexpr int sx1280ARst = 7;
 constexpr int sx1280ARxEn = 15;
 constexpr int sx1280ATxEn = 16;
 constexpr int sx1280APAdbm = 26;
-constexpr int sx1280AMaxPower = 10;
+constexpr int sx1280AMaxPower = 27;
 
 // Radio B is still physically populated on the controller board. Keep its
 // pins in a safe state so it does not interfere with Radio A, but do not use

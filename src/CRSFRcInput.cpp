@@ -2,15 +2,18 @@
 
 #ifdef ENABLE_CRSF_INPUT
 
+#include <cstdio>
 #include <cstring>
 
 #include "ExVectrCore.hpp"
 
 #include "DatalinkCommandManager.hpp"
+#include "DynamicPowerSetup.hpp"
 #include "ExVectrLink/datalink/PacketTypes.hpp"
 #include "ExVectrNetwork/DataPacket.hpp"
 #include "ExVectrPackets/crsf/CRSFTypes.hpp"
 #include "FhssSetup.hpp"
+#include "WifiUpload.hpp"
 
 namespace VCTR::ExVectrLink {
 
@@ -60,6 +63,78 @@ constexpr uint8_t CRSF_ADDRESS_ELRS_LUA = 0xEF; // the ELRS handset Lua script
 uint8_t replyDestForOrigin(uint8_t origin) {
   return (origin == CRSF_ADDRESS_ELRS_LUA) ? CRSF_ADDRESS_RADIO_TRANSMITTER
                                            : origin;
+}
+
+using VCTR::ExVectrLink::datalink::DynamicPower;
+
+// Builds the ';'-joined list of power levels (dBm) usable on this hardware --
+// i.e. the DynamicPower::kPowerLevels entries within [hwMinDbm, hwMaxDbm] --
+// so the Lua menu can never offer a level that DynamicPower::setPower()/
+// incPower()/decPower() would just clamp away again. Returns how many
+// options were written.
+uint8_t buildAllowedPowerOptions(char *out, size_t outSize, uint8_t hwMinDbm,
+                                 uint8_t hwMaxDbm) {
+  size_t pos = 0;
+  uint8_t count = 0;
+  for (size_t i = 0; i < DynamicPower::kNumPowerLevels; i++) {
+    const uint8_t level = DynamicPower::kPowerLevels[i];
+    if (level < hwMinDbm || level > hwMaxDbm) {
+      continue;
+    }
+    if (count > 0 && pos < outSize) {
+      out[pos++] = ';';
+    }
+    const int written = snprintf(out + pos, outSize - pos, "%u", level);
+    if (written > 0) {
+      pos += (size_t)written;
+    }
+    count++;
+  }
+  if (pos >= outSize) {
+    pos = outSize - 1;
+  }
+  out[pos] = '\0';
+  return count;
+}
+
+// Index (into the hardware-allowed subset buildAllowedPowerOptions() would
+// build for the same hwMinDbm/hwMaxDbm) of the highest allowed level <= dbm
+// -- mirrors DynamicPower::setPower()'s own "highest level <= requested"
+// snapping, so the selection shown always matches what the radio would
+// actually use for that dBm value.
+uint8_t allowedPowerIndexFor(uint8_t hwMinDbm, uint8_t hwMaxDbm, uint8_t dbm) {
+  uint8_t idx = 0;
+  uint8_t count = 0;
+  for (size_t i = 0; i < DynamicPower::kNumPowerLevels; i++) {
+    const uint8_t level = DynamicPower::kPowerLevels[i];
+    if (level < hwMinDbm || level > hwMaxDbm) {
+      continue;
+    }
+    if (level <= dbm) {
+      idx = count;
+    }
+    count++;
+  }
+  return idx;
+}
+
+// The dBm value at `index` within the hardware-allowed subset (inverse of
+// allowedPowerIndexFor()) -- falls back to hwMinDbm for an out-of-range
+// index rather than an arbitrary/unreachable value.
+uint8_t allowedPowerAtIndex(uint8_t hwMinDbm, uint8_t hwMaxDbm,
+                           uint8_t index) {
+  uint8_t count = 0;
+  for (size_t i = 0; i < DynamicPower::kNumPowerLevels; i++) {
+    const uint8_t level = DynamicPower::kPowerLevels[i];
+    if (level < hwMinDbm || level > hwMaxDbm) {
+      continue;
+    }
+    if (count == index) {
+      return level;
+    }
+    count++;
+  }
+  return hwMinDbm;
 }
 
 } // namespace
@@ -220,27 +295,78 @@ void CRSFRcInput::handleParameterPing(
 
 void CRSFRcInput::handleParameterRead(
     const VCTR::packets::crsf::CRSFPacket_ParameterRead &req) {
-  if (req.parameterNumber != kBindParameterNumber) {
-    // Only one parameter exposed -- see extern/CRSF details.md's Chunks
-    // note: hosts fall back to requesting from parameter 1 onward when the
-    // device doesn't answer for parameter 0 (root folder).
+  const uint8_t replyDest = replyDestForOrigin(req.origAddress);
+
+  if (req.parameterNumber == kTempParameterNumber) {
+    sendTempEntry(replyDest);
     return;
   }
-  // Reading a COMMAND parameter resets it to idle -- mirrors ExpressLRS's
-  // CRSFEndpoint::parameterUpdateReq() (READ of a CRSF_COMMAND, chunk 0,
-  // sets step=lcsIdle, info=""), so re-opening the menu always shows the
-  // Bind command ready rather than stuck mid-run.
-  if (req.chunkNumber == 0) {
-    bindStep_ = VCTR::packets::crsf::CRSFCommandStep::Ready;
-    bindInfo_[0] = '\0';
+  if (req.parameterNumber == kDynPowerEnableParameterNumber) {
+    sendDynPowerEnableEntry(replyDest);
+    return;
   }
-  sendBindEntry(bindStep_, bindInfo_, replyDestForOrigin(req.origAddress));
+  if (req.parameterNumber == kDynMinPowerParameterNumber) {
+    sendDynMinPowerEntry(replyDest);
+    return;
+  }
+  if (req.parameterNumber == kDynMaxPowerParameterNumber) {
+    sendDynMaxPowerEntry(replyDest);
+    return;
+  }
+  if (req.parameterNumber == kRuntimeParameterNumber) {
+    sendRuntimeEntry(replyDest);
+    return;
+  }
+  if (req.parameterNumber == kDesyncParameterNumber) {
+    sendDesyncEntry(replyDest);
+    return;
+  }
+  if (req.parameterNumber == kFhssOffsetParameterNumber) {
+    sendFhssOffsetEntry(replyDest);
+    return;
+  }
+  if (req.parameterNumber == kIntervalOffsetParameterNumber) {
+    sendIntervalOffsetEntry(replyDest);
+    return;
+  }
+  if (req.parameterNumber == kTxMissedParameterNumber) {
+    sendTxMissedEntry(replyDest);
+    return;
+  }
+  if (req.parameterNumber == kRxMissedParameterNumber) {
+    sendRxMissedEntry(replyDest);
+    return;
+  }
+
+  // COMMAND parameters (TX / RX upload mode). Reading a COMMAND resets it to
+  // idle -- mirrors ExpressLRS's CRSFEndpoint::parameterUpdateReq() (READ of a
+  // CRSF_COMMAND, chunk 0, sets step=lcsIdle, info=""), so re-opening the menu
+  // always shows the command ready rather than stuck mid-run.
+  if (req.parameterNumber == kTxUploadParameterNumber) {
+    if (req.chunkNumber == 0) {
+      txUpload_.step = VCTR::packets::crsf::CRSFCommandStep::Ready;
+      txUpload_.info[0] = '\0';
+    }
+    sendCommandEntry(kTxUploadParameterNumber, "TX Upload Mode", txUpload_,
+                     replyDest);
+    return;
+  }
+  if (req.parameterNumber == kRxUploadParameterNumber) {
+    if (req.chunkNumber == 0) {
+      rxUpload_.step = VCTR::packets::crsf::CRSFCommandStep::Ready;
+      rxUpload_.info[0] = '\0';
+    }
+    sendCommandEntry(kRxUploadParameterNumber, "RX Upload Mode", rxUpload_,
+                     replyDest);
+    return;
+  }
+  // Any other parameter number: nothing to send -- see extern/CRSF details.md's
+  // Chunks note (hosts fall back to requesting from parameter 1 onward when the
+  // device doesn't answer for parameter 0 / the root folder).
 }
 
 void CRSFRcInput::handleParameterWrite(
     const VCTR::packets::crsf::CRSFPacket_ParameterWrite &req) {
-  using VCTR::packets::crsf::CRSFCommandStep;
-
   const uint8_t replyDest = replyDestForOrigin(req.origAddress);
 
   // Parameter 0 is the ELRS Lua's special "link statistics request": it
@@ -252,32 +378,62 @@ void CRSFRcInput::handleParameterWrite(
     return;
   }
 
-  if (req.parameterNumber != kBindParameterNumber) {
+  // TEXT_SELECTION writes: apply the new value and return -- unlike the Bind
+  // COMMAND below, no ack is needed here. Mirrors ExpressLRS's own parameter
+  // callbacks (e.g. luaDynamicPower's), which likewise just apply the value;
+  // the Lua script re-reads the field itself a short delay after a save (see
+  // elrs.lua's reloadRelatedFields()) rather than expecting an unsolicited
+  // reply, so pushing one here would just be redundant.
+  if (req.parameterNumber == kDynPowerEnableParameterNumber) {
+    // Disabling the algorithm pins power to the dynamic-max (handled inside
+    // DynamicPower::setEnableDynamicPower()); push that to the radio right
+    // away rather than waiting for the next FHSS slot to apply it.
+    ExVectrLink::datalink::getDynamicPower().setEnableDynamicPower(
+        req.commandStatus != 0);
+    ExVectrLink::datalink::applyDynamicPowerToRadios();
+    return;
+  }
+  if (req.parameterNumber == kDynMinPowerParameterNumber ||
+      req.parameterNumber == kDynMaxPowerParameterNumber) {
+    auto &dynPower = ExVectrLink::datalink::getDynamicPower();
+    // Map the chosen option index back to dBm within this radio's actual
+    // hardware ceiling/floor -- the same range sendDynMinPowerEntry()/
+    // sendDynMaxPowerEntry() built the option list from, so the index always
+    // means the same power level on both ends.
+    const uint8_t dbm = allowedPowerAtIndex(
+        dynPower.getMinPower(), dynPower.getMaxPower(), req.commandStatus);
+    if (req.parameterNumber == kDynMinPowerParameterNumber) {
+      dynPower.setDynMinPower(dbm);
+    } else {
+      dynPower.setDynMaxPower(dbm);
+    }
+    // Both setters re-clamp the current power inside the new limits straight
+    // away (DynamicPower::constrainPowerToLimits()); push the result to the
+    // radio now rather than waiting for the next FHSS slot.
+    ExVectrLink::datalink::applyDynamicPowerToRadios();
     return;
   }
 
-  const int64_t nowNs = Core::NowNs();
-
-  if (req.commandStatus < static_cast<uint8_t>(CRSFCommandStep::Cancel)) {
-    // Click (and anything short of Cancel/Poll) executes immediately, same
-    // as ExpressLRS's handleSimpleSendCmd() for its "Bind" command -- no
-    // confirmation step. Unlike a real RF bind, "executing" here just means
-    // relaying a one-shot trigger to the RX so it enters WiFi upload mode.
-    lastBindClickNs_ = nowNs;
-    bindStep_ = CRSFCommandStep::Progress;
-    strncpy(bindInfo_, "WiFi Upload...", sizeof(bindInfo_) - 1);
-    bindInfo_[sizeof(bindInfo_) - 1] = '\0';
-    triggerRxWifiUpload();
-    sendBindEntry(bindStep_, bindInfo_, replyDest);
-  } else if (req.commandStatus == static_cast<uint8_t>(CRSFCommandStep::Cancel) ||
-             (nowNs - lastBindClickNs_) > kBindStatusTimeoutNs) {
-    bindStep_ = CRSFCommandStep::Ready;
-    bindInfo_[0] = '\0';
-    sendBindEntry(bindStep_, bindInfo_, replyDest);
+  // COMMAND parameter writes: run the click/execute/auto-revert state machine.
+  if (req.parameterNumber == kTxUploadParameterNumber) {
+    // "TX Upload Mode": put THIS module into WiFi upload mode. This is
+    // terminal (startWiFiUploadMode() removes all tasks, including CRSF), so
+    // the executing-status reply queued below is best-effort -- the handset
+    // will simply time out once the module drops off the bus.
+    handleUploadCommandWrite(
+        txUpload_, kTxUploadParameterNumber, "TX Upload Mode", "WiFi Upload...",
+        []() { WifiUpload::startWiFiUploadMode(); }, req.commandStatus,
+        replyDest);
+    return;
   }
-  // else: still executing (Poll) and not timed out yet -- send nothing, same
-  // as ExpressLRS: the handset keeps polling until it gets an Idle reply or
-  // its own local timeout expires.
+  if (req.parameterNumber == kRxUploadParameterNumber) {
+    // "RX Upload Mode": relay the one-shot upload trigger over the air so the
+    // far end enters WiFi upload mode; our own link keeps running.
+    handleUploadCommandWrite(
+        rxUpload_, kRxUploadParameterNumber, "RX Upload Mode", "RX WiFi...",
+        [this]() { triggerRxWifiUpload(); }, req.commandStatus, replyDest);
+    return;
+  }
 }
 
 void CRSFRcInput::sendElrsStatus(uint8_t destAddress) {
@@ -306,14 +462,179 @@ void CRSFRcInput::sendElrsStatus(uint8_t destAddress) {
   sendTelemetry(pkt);
 }
 
-void CRSFRcInput::sendBindEntry(VCTR::packets::crsf::CRSFCommandStep status,
-                                const char *info, uint8_t destAddress) {
+void CRSFRcInput::sendCommandEntry(uint8_t parameterNumber, const char *name,
+                                   const UploadCommand &cmd,
+                                   uint8_t destAddress) {
   VCTR::packets::crsf::CRSFPacket_ParameterSettingsEntryCommand entry;
   entry.destAddress = destAddress;
-  entry.parameterNumber = kBindParameterNumber;
-  entry.status = static_cast<uint8_t>(status);
-  strncpy(entry.info, info, sizeof(entry.info) - 1);
+  entry.parameterNumber = parameterNumber;
+  strncpy(entry.name, name, sizeof(entry.name) - 1);
+  entry.name[sizeof(entry.name) - 1] = '\0';
+  entry.status = static_cast<uint8_t>(cmd.step);
+  strncpy(entry.info, cmd.info, sizeof(entry.info) - 1);
   entry.info[sizeof(entry.info) - 1] = '\0';
+  sendTelemetry(entry);
+}
+
+void CRSFRcInput::handleUploadCommandWrite(
+    UploadCommand &cmd, uint8_t parameterNumber, const char *name,
+    const char *runningInfo, const std::function<void()> &action,
+    uint8_t commandStatus, uint8_t replyDest) {
+  using VCTR::packets::crsf::CRSFCommandStep;
+  const int64_t nowNs = Core::NowNs();
+
+  if (commandStatus < static_cast<uint8_t>(CRSFCommandStep::Cancel)) {
+    // Click (and anything short of Cancel/Poll) executes immediately, same as
+    // ExpressLRS's handleSimpleSendCmd() -- no confirmation step.
+    cmd.lastClickNs = nowNs;
+    cmd.step = CRSFCommandStep::Progress;
+    strncpy(cmd.info, runningInfo, sizeof(cmd.info) - 1);
+    cmd.info[sizeof(cmd.info) - 1] = '\0';
+    action();
+    sendCommandEntry(parameterNumber, name, cmd, replyDest);
+  } else if (commandStatus == static_cast<uint8_t>(CRSFCommandStep::Cancel) ||
+             (nowNs - cmd.lastClickNs) > kCommandStatusTimeoutNs) {
+    cmd.step = CRSFCommandStep::Ready;
+    cmd.info[0] = '\0';
+    sendCommandEntry(parameterNumber, name, cmd, replyDest);
+  }
+  // else: still executing (Poll) and not timed out yet -- send nothing, same
+  // as ExpressLRS: the handset keeps polling until it gets an Idle reply or
+  // its own local timeout expires.
+}
+
+void CRSFRcInput::sendTempEntry(uint8_t destAddress) {
+  VCTR::packets::crsf::CRSFPacket_ParameterSettingsEntryInfo entry;
+  entry.destAddress = destAddress;
+  entry.parameterNumber = kTempParameterNumber;
+
+#if defined(ESP32)
+  // ESP32 Arduino core's on-die temperature sensor -- the same reading
+  // main.cpp's TempMonitor already samples for the serial host, just read
+  // fresh here instead of cached, since this only needs to be current at the
+  // moment the handset actually asks for it.
+  const int tempC = (int)temperatureRead();
+#else
+  const int tempC = 0;
+#endif
+  snprintf(entry.info, sizeof(entry.info), "%d C", tempC);
+
+  sendTelemetry(entry);
+}
+
+void CRSFRcInput::sendRuntimeEntry(uint8_t destAddress) {
+  VCTR::packets::crsf::CRSFPacket_ParameterSettingsEntryInfo entry;
+  entry.destAddress = destAddress;
+  entry.parameterNumber = kRuntimeParameterNumber;
+  strncpy(entry.name, "RX Runtime", sizeof(entry.name) - 1);
+  snprintf(entry.info, sizeof(entry.info), "%u min",
+           ExVectrLink::datalink::getRemoteRuntimeMinutes());
+  sendTelemetry(entry);
+}
+
+void CRSFRcInput::sendDesyncEntry(uint8_t destAddress) {
+  VCTR::packets::crsf::CRSFPacket_ParameterSettingsEntryInfo entry;
+  entry.destAddress = destAddress;
+  entry.parameterNumber = kDesyncParameterNumber;
+  strncpy(entry.name, "RX Desync", sizeof(entry.name) - 1);
+  snprintf(entry.info, sizeof(entry.info), "%u",
+           ExVectrLink::datalink::getRemoteDesyncCount());
+  sendTelemetry(entry);
+}
+
+void CRSFRcInput::sendFhssOffsetEntry(uint8_t destAddress) {
+  VCTR::packets::crsf::CRSFPacket_ParameterSettingsEntryInfo entry;
+  entry.destAddress = destAddress;
+  entry.parameterNumber = kFhssOffsetParameterNumber;
+  strncpy(entry.name, "FHSS Offset", sizeof(entry.name) - 1);
+  snprintf(entry.info, sizeof(entry.info), "%d us",
+           (int)ExVectrLink::datalink::getRemoteFhssOffsetUs());
+  sendTelemetry(entry);
+}
+
+void CRSFRcInput::sendIntervalOffsetEntry(uint8_t destAddress) {
+  VCTR::packets::crsf::CRSFPacket_ParameterSettingsEntryInfo entry;
+  entry.destAddress = destAddress;
+  entry.parameterNumber = kIntervalOffsetParameterNumber;
+  strncpy(entry.name, "FHSS Interval", sizeof(entry.name) - 1);
+  snprintf(entry.info, sizeof(entry.info), "%d ns",
+           (int)ExVectrLink::datalink::getRemoteIntervalOffsetNs());
+  sendTelemetry(entry);
+}
+
+void CRSFRcInput::sendTxMissedEntry(uint8_t destAddress) {
+  VCTR::packets::crsf::CRSFPacket_ParameterSettingsEntryInfo entry;
+  entry.destAddress = destAddress;
+  entry.parameterNumber = kTxMissedParameterNumber;
+  strncpy(entry.name, "TX Missed", sizeof(entry.name) - 1);
+  snprintf(entry.info, sizeof(entry.info), "%u",
+           (unsigned)ExVectrLink::datalink::getFhss().getMissedSlotCounter());
+  sendTelemetry(entry);
+}
+
+void CRSFRcInput::sendRxMissedEntry(uint8_t destAddress) {
+  VCTR::packets::crsf::CRSFPacket_ParameterSettingsEntryInfo entry;
+  entry.destAddress = destAddress;
+  entry.parameterNumber = kRxMissedParameterNumber;
+  strncpy(entry.name, "RX Missed", sizeof(entry.name) - 1);
+  snprintf(entry.info, sizeof(entry.info), "%u",
+           (unsigned)ExVectrLink::datalink::getRemoteMissedSlots());
+  sendTelemetry(entry);
+}
+
+void CRSFRcInput::sendDynPowerEnableEntry(uint8_t destAddress) {
+  const auto &dynPower = ExVectrLink::datalink::getDynamicPower();
+
+  VCTR::packets::crsf::CRSFPacket_ParameterSettingsEntryTextSelection entry;
+  entry.destAddress = destAddress;
+  entry.parameterNumber = kDynPowerEnableParameterNumber;
+  strncpy(entry.name, "Dyn Power", sizeof(entry.name) - 1);
+  strncpy(entry.options, "Off;On", sizeof(entry.options) - 1);
+  entry.value = dynPower.isDynamicPowerEnabled() ? 1 : 0;
+  entry.min = 0;
+  entry.max = 1;
+  entry.defaultValue = 1;
+
+  sendTelemetry(entry);
+}
+
+void CRSFRcInput::sendDynMinPowerEntry(uint8_t destAddress) {
+  const auto &dynPower = ExVectrLink::datalink::getDynamicPower();
+  const uint8_t hwMin = dynPower.getMinPower();
+  const uint8_t hwMax = dynPower.getMaxPower();
+
+  VCTR::packets::crsf::CRSFPacket_ParameterSettingsEntryTextSelection entry;
+  entry.destAddress = destAddress;
+  entry.parameterNumber = kDynMinPowerParameterNumber;
+  strncpy(entry.name, "Dyn Min Pwr", sizeof(entry.name) - 1);
+  strncpy(entry.unit, "dBm", sizeof(entry.unit) - 1);
+  const uint8_t count =
+      buildAllowedPowerOptions(entry.options, sizeof(entry.options), hwMin, hwMax);
+  entry.min = 0;
+  entry.max = count > 0 ? count - 1 : 0;
+  entry.value = allowedPowerIndexFor(hwMin, hwMax, dynPower.getDynMinPower());
+  entry.defaultValue = entry.min;
+
+  sendTelemetry(entry);
+}
+
+void CRSFRcInput::sendDynMaxPowerEntry(uint8_t destAddress) {
+  const auto &dynPower = ExVectrLink::datalink::getDynamicPower();
+  const uint8_t hwMin = dynPower.getMinPower();
+  const uint8_t hwMax = dynPower.getMaxPower();
+
+  VCTR::packets::crsf::CRSFPacket_ParameterSettingsEntryTextSelection entry;
+  entry.destAddress = destAddress;
+  entry.parameterNumber = kDynMaxPowerParameterNumber;
+  strncpy(entry.name, "Dyn Max Pwr", sizeof(entry.name) - 1);
+  strncpy(entry.unit, "dBm", sizeof(entry.unit) - 1);
+  const uint8_t count =
+      buildAllowedPowerOptions(entry.options, sizeof(entry.options), hwMin, hwMax);
+  entry.min = 0;
+  entry.max = count > 0 ? count - 1 : 0;
+  entry.value = allowedPowerIndexFor(hwMin, hwMax, dynPower.getDynMaxPower());
+  entry.defaultValue = entry.max;
+
   sendTelemetry(entry);
 }
 

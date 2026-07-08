@@ -71,23 +71,78 @@ private:
       const VCTR::packets::crsf::CRSFPacket_RcChannelsPacked &pkt);
 
   // ── CRSF parameter/command protocol (handset Lua config menu) ──
-  // Exposes a single CRSF COMMAND parameter, "Bind", that the standard
-  // ELRS/EdgeTX Lua config screen can list and execute. Unlike a real
-  // ExpressLRS bind, executing it just relays a one-shot OTA trigger to the
-  // far end (see DatalinkCommandManager's PacketTypes::UploadMode handling)
-  // to make the RX enter WiFi firmware-upload mode. See TXModuleParameters.cpp
-  // in extern/ExpressLRS-master for the reference command-parameter state
-  // machine this mirrors (handleSimpleSendCmd()).
-  static constexpr uint8_t kBindParameterNumber = 1;
+  // Exposes two CRSF COMMAND parameters the standard ELRS/EdgeTX Lua config
+  // screen can list and execute:
+  //   "TX Upload Mode" -- puts THIS module into WiFi firmware-upload mode
+  //                       (WifiUpload::startWiFiUploadMode()); terminal, it
+  //                       tears down all tasks including CRSF.
+  //   "RX Upload Mode" -- relays a one-shot OTA trigger to the far end (see
+  //                       DatalinkCommandManager's PacketTypes::UploadMode
+  //                       handling) so the RX enters WiFi upload mode.
+  // See TXModuleParameters.cpp in extern/ExpressLRS-master for the reference
+  // command-parameter state machine this mirrors (handleSimpleSendCmd()).
+  // Actions live at the end of the menu, after the read-only stats and the
+  // settings (see the parameter-number assignments below).
+  static constexpr uint8_t kTxUploadParameterNumber = 11;
+  static constexpr uint8_t kRxUploadParameterNumber = 12;
   // Mirrors ExpressLRS's handleSimpleSendCmd() 2 s auto-revert-to-idle so a
   // lost/never-polled-again command doesn't leave the Lua entry stuck
   // showing "executing" forever.
-  static constexpr int64_t kBindStatusTimeoutNs = 2000 * Core::MILLISECONDS;
+  static constexpr int64_t kCommandStatusTimeoutNs = 2000 * Core::MILLISECONDS;
 
-  VCTR::packets::crsf::CRSFCommandStep bindStep_ =
-      VCTR::packets::crsf::CRSFCommandStep::Ready;
-  char bindInfo_[32] = "";
-  int64_t lastBindClickNs_ = 0;
+  // Per-command state for the COMMAND parameters above -- each drives its own
+  // idle/executing lifecycle independently.
+  struct UploadCommand {
+    VCTR::packets::crsf::CRSFCommandStep step =
+        VCTR::packets::crsf::CRSFCommandStep::Ready;
+    char info[32] = "";
+    int64_t lastClickNs = 0;
+  };
+  UploadCommand txUpload_;
+  UploadCommand rxUpload_;
+
+  // Read-only INFO parameter showing this TX module's own chip temperature.
+  // Sampled fresh each time the field is actually read (menu opened/
+  // reloaded) rather than on a timer -- the CRSF parameter protocol has no
+  // way to push an unsolicited update to a plain (non-command) field, so a
+  // background timer would just go stale between reads anyway.
+  static constexpr uint8_t kTempParameterNumber = 1;
+  void sendTempEntry(uint8_t destAddress);
+
+  // TEXT_SELECTION controls for VCTR::ExVectrLink::datalink::DynamicPower --
+  // enable/disable, plus the min/max power the dynamic-power algorithm is
+  // allowed to pick within. Mirrors ExpressLRS's "Dynamic" TX-power selection
+  // (TXModuleParameters.cpp's luaDynamicPower). The offered options are
+  // always filtered down to DynamicPower::kPowerLevels entries within this
+  // radio's actual hardware ceiling/floor (DynamicPower::getMaxPower()/
+  // getMinPower()) -- see buildAllowedPowerOptions() in the .cpp -- so the
+  // menu can never offer a level the hardware isn't capable of.
+  static constexpr uint8_t kDynPowerEnableParameterNumber = 8;
+  static constexpr uint8_t kDynMinPowerParameterNumber = 9;
+  static constexpr uint8_t kDynMaxPowerParameterNumber = 10;
+  void sendDynPowerEnableEntry(uint8_t destAddress);
+  void sendDynMinPowerEntry(uint8_t destAddress);
+  void sendDynMaxPowerEntry(uint8_t destAddress);
+
+  // Read-only INFO parameters showing the far-end (RX-side) debug diagnostics
+  // decoded from its OTA RxState packet (see DatalinkCommandManager's
+  // getRemote*() accessors). Like the temperature entry, each is sampled
+  // fresh when the menu actually reads it.
+  static constexpr uint8_t kRuntimeParameterNumber = 2;
+  static constexpr uint8_t kDesyncParameterNumber = 3;
+  static constexpr uint8_t kFhssOffsetParameterNumber = 4;
+  static constexpr uint8_t kIntervalOffsetParameterNumber = 5;
+  // FHSS missed-slot (scheduling-latency) counters -- TX Missed is this
+  // module's own (getFhss().getMissedSlotCounter()); RX Missed is the far
+  // end's, decoded from its OTA SlotStats packet (getRemoteMissedSlots()).
+  static constexpr uint8_t kTxMissedParameterNumber = 6;
+  static constexpr uint8_t kRxMissedParameterNumber = 7;
+  void sendRuntimeEntry(uint8_t destAddress);
+  void sendDesyncEntry(uint8_t destAddress);
+  void sendFhssOffsetEntry(uint8_t destAddress);
+  void sendIntervalOffsetEntry(uint8_t destAddress);
+  void sendTxMissedEntry(uint8_t destAddress);
+  void sendRxMissedEntry(uint8_t destAddress);
 
   void handleParameterPing(
       const VCTR::packets::crsf::CRSFPacket_ParameterPing &ping);
@@ -95,8 +150,17 @@ private:
       const VCTR::packets::crsf::CRSFPacket_ParameterRead &req);
   void handleParameterWrite(
       const VCTR::packets::crsf::CRSFPacket_ParameterWrite &req);
-  void sendBindEntry(VCTR::packets::crsf::CRSFCommandStep status,
-                     const char *info, uint8_t destAddress);
+  // Serializes one COMMAND parameter entry (`name` + current step/info of
+  // `cmd`) back to the handset.
+  void sendCommandEntry(uint8_t parameterNumber, const char *name,
+                        const UploadCommand &cmd, uint8_t destAddress);
+  // Runs the click/execute/auto-revert state machine for a COMMAND parameter
+  // write, invoking `action` on click. `runningInfo` is the status text shown
+  // while executing.
+  void handleUploadCommandWrite(UploadCommand &cmd, uint8_t parameterNumber,
+                                const char *name, const char *runningInfo,
+                                const std::function<void()> &action,
+                                uint8_t commandStatus, uint8_t replyDest);
   // Sends a CRSF 0x2E ELRS-status frame (good/bad packet counter + connection
   // flag) in response to the ELRS Lua's periodic parameter-0 link-stat poll.
   void sendElrsStatus(uint8_t destAddress);

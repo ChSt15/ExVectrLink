@@ -1,11 +1,10 @@
 #include "DynamicPowerSetup.hpp"
 
+#include "DatalinkCommandManager.hpp"
 #include "DatalinkSetup.hpp"
 #include "FhssSetup.hpp"
 
 namespace VCTR::ExVectrLink::datalink {
-
-static int64_t lastReceivedLinkInfoPacketTime = 0;
 
 VCTR::ExVectrLink::datalink::DynamicPower &getDynamicPower() {
   static DynamicPower dynamicPower;
@@ -22,7 +21,6 @@ void applyDynamicPowerToRadios() {
 
 void updateDynamicPowerFromRemoteLinkInfo(int8_t remoteRssi, int8_t remoteSnr,
                                           uint8_t remoteLq) {
-  lastReceivedLinkInfoPacketTime = Core::NowNs();
   auto &dynamicPower = getDynamicPower();
   dynamicPower.update(true, remoteRssi, remoteSnr, remoteLq);
   applyDynamicPowerToRadios();
@@ -51,9 +49,18 @@ void setupDynamicPower() {
       consecutiveLostPackets++;
     }
 
-    if ((consecutiveLostPackets >= 2 ||
-         Core::NowNs() - lastReceivedLinkInfoPacketTime >
-             300 * Core::MILLISECONDS) &&
+    // "Far end link info gone stale" is deliberately keyed off
+    // getRemoteLinkStats().valid (any OTA packet within the last 1000 ms --
+    // see its doc comment) rather than a separately-tracked "last
+    // LinkTelemetry packet" timestamp: LinkInfoSender substitutes an
+    // RxState packet for LinkTelemetry roughly once every 1.2 s, creating a
+    // routine ~400 ms gap between LinkTelemetry packets on an otherwise
+    // perfectly healthy link. A tighter, LinkTelemetry-only staleness check
+    // here previously false-triggered on that gap every cycle -- and with
+    // no rate limit on this per-slot incPower() (unlike decPower()'s 1 s
+    // cooldown), a handful of slot-ends during each false-positive window
+    // was enough to saturate power to max almost immediately.
+    if ((consecutiveLostPackets >= 2 || !getRemoteLinkStats().valid) &&
         getDynamicPower().isDynamicPowerEnabled()) {
       getDynamicPower().incPower();
     }

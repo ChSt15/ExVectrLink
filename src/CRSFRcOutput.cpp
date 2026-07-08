@@ -9,6 +9,8 @@
 #include "ExVectrPackets/telecoms/packets/Telecommands.hpp"
 #include "ExVectrPackets/telecoms/packets/Telemetry.hpp"
 
+#include "DatalinkSetup.hpp"
+#include "DiversitySetup.hpp"
 #include "ExVectrLink/datalink/PacketTypes.hpp"
 #include "FhssSetup.hpp"
 #include "WifiUpload.hpp"
@@ -16,6 +18,17 @@
 namespace VCTR::ExVectrLink {
 
 namespace {
+
+// Local radio to read uplink RSSI/SNR from -- the aggregate diversity view
+// when two radios are present, otherwise radio A. Same selection CRSFOutput
+// and CRSFRcInput use for their own link-stats frames.
+const VCTR::network::datalink::Sx1280_DirectI &getLinkStatsRadio() {
+#if defined(HAS_DIVERSITY)
+  return VCTR::ExVectrLink::datalink::getSx1280Diversity();
+#else
+  return VCTR::ExVectrLink::datalink::getDatalinkRadioA();
+#endif
+}
 
 // 1-second sliding-window counters, same approach as CRSFOutput's original
 // implementation (which these replace -- see getCrsfRcPacketRateHz() /
@@ -148,6 +161,13 @@ void CRSFRcOutput::taskThread() {
     writeRcChannelsFrame();
     newRcPacket_ = false;
   }
+
+  // Send link stats on their own timer, independent of RC-packet arrival:
+  // the FC's LQ/RSSI/SNR readouts only update when it receives a 0x14 frame.
+  if (nowNs - lastLinkStatsSendNs_ >= LINK_STATS_INTERVAL_NS) {
+    lastLinkStatsSendNs_ = nowNs;
+    writeLinkStatsFrame();
+  }
 }
 
 template <VCTR::packets::IsPacket CrsfT, VCTR::packets::IsPacket ExVectrT>
@@ -255,6 +275,63 @@ void CRSFRcOutput::writeRcChannelsFrame() {
   pkt.channels[7] =
       (float)f.digitalChannels[3] / 2 * (CRSF_CHANNEL_MAX - CRSF_CHANNEL_MIN) +
       CRSF_CHANNEL_MIN;
+
+  if (!crsf_.write(pkt)) {
+    noteCrsfTxFailure(Core::NowNs());
+  }
+}
+
+void CRSFRcOutput::writeLinkStatsFrame() {
+  const auto &radio = getLinkStatsRadio();
+
+  // Uplink (ground TX -> this RX -> FC): the RX receives the ground link
+  // directly, so uplink RSSI/SNR/LQ come from our own local radio readings.
+  const int16_t rssiRaw = radio.getPacketRSSI();
+  const int16_t snrRaw = radio.getPacketSNR();
+  const float lq = datalink::getFhss().getLinkQuality();        // 0.0 – 1.0
+  const float packetQ = datalink::getFhss().getPacketQuality(); // 0.0 – 1.0
+
+  const uint8_t uplinkRssi = (rssiRaw < 0) ? (uint8_t)(-rssiRaw) : (uint8_t)0;
+
+  // TX power: report the remote (ground TX) power so the FC sees what the
+  // transmitter is actually doing, falling back to 0 if no OTA link telemetry
+  // has been received yet. Mapped to the CRSF Link Statistics power-index
+  // enum: 0mW, 10mW, 25mW, 100mW, 500mW, 1000mW, 2000mW, 250mW, 50mW.
+  const int8_t reportedTxDbm = datalink::getRemoteLinkStats().txPowerdBm;
+  uint8_t txPowerIdx;
+  if (reportedTxDbm <= 0) {
+    txPowerIdx = 0; // 0 mW
+  } else if (reportedTxDbm <= 10) {
+    txPowerIdx = 1; // 10 mW
+  } else if (reportedTxDbm <= 14) {
+    txPowerIdx = 2; // 25 mW
+  } else if (reportedTxDbm <= 17) {
+    txPowerIdx = 8; // 50 mW
+  } else if (reportedTxDbm <= 20) {
+    txPowerIdx = 3; // 100 mW
+  } else if (reportedTxDbm <= 24) {
+    txPowerIdx = 7; // 250 mW
+  } else if (reportedTxDbm <= 27) {
+    txPowerIdx = 4; // 500 mW
+  } else if (reportedTxDbm <= 30) {
+    txPowerIdx = 5; // 1000 mW
+  } else if (reportedTxDbm <= 33) {
+    txPowerIdx = 6; // 2000 mW
+  } else {
+    txPowerIdx = 0;
+  }
+
+  VCTR::packets::crsf::CRSFPacket_LinkStatistics pkt;
+  pkt.upRssiAnt1 = uplinkRssi;
+  pkt.upRssiAnt2 = 0;                       // single antenna
+  pkt.upLinkQuality = (uint8_t)(lq * 100.0f);
+  pkt.upSnr = (int8_t)snrRaw;
+  pkt.activeAntenna = 0;
+  pkt.rfProfile = 4;                        // RF mode (generic)
+  pkt.upRfPower = txPowerIdx;
+  pkt.downRssi = 0;                         // downlink (FC->RX) N/A here
+  pkt.downLinkQuality = (uint8_t)(packetQ * 100.0f);
+  pkt.downSnr = 0;
 
   if (!crsf_.write(pkt)) {
     noteCrsfTxFailure(Core::NowNs());

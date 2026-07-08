@@ -31,7 +31,8 @@ struct RemoteLinkStats {
 enum class OtaSendKey : uint8_t {
   RcChannels,        ///< CRSFRcInput: handset RC channels, ground -> FC.
   LinkTelemetry,     ///< DatalinkCommandManager: compact link stats.
-  RxState,           ///< DatalinkCommandManager: desync/rate diagnostics.
+  RxState,           ///< DatalinkCommandManager: desync/runtime/FHSS-timing
+                     ///< debug diagnostics (see encodeRxState).
   CrsfBatterySensor, ///< CRSFRcOutput: FC battery telemetry relay.
   CrsfGpsStats,    ///< CRSFRcOutput: FC GPS speed/satellites/altitude relay.
   CrsfGpsPosition, ///< CRSFRcOutput: FC GPS latitude/longitude relay --
@@ -41,6 +42,8 @@ enum class OtaSendKey : uint8_t {
                      ///< command relayed to the far end (see PacketTypes::
                      ///< UploadMode). Only ever carries this single message,
                      ///< so coalescing repeated clicks is harmless.
+  SlotStats,         ///< DatalinkCommandManager: FHSS missed-slot counter
+                     ///< (see PacketTypes::SlotStats), sent once per second.
 };
 
 extern void
@@ -63,21 +66,34 @@ int8_t getLocalTxPowerdBm();
 /// Returns the most recently decoded far-end link stats (from OTA LinkInfo).
 const RemoteLinkStats &getRemoteLinkStats();
 
-/// Returns the far end's packet quality (0-100 %), from the OTA RxState
-/// packet. Kept separate from RemoteLinkStats since it arrives via a
-/// different OTA packet type (RxState vs LinkTelemetry).
+/// Returns the far end's packet quality (0-100 %). No longer carried in the
+/// RxState packet (dropped for the debug fields below); currently always 0.
 uint8_t getRemotePacketQuality();
 
-/// Returns the far end's CRSF TX-failure rate (frames/s that couldn't be
-/// written to its flight controller because the send buffer was full),
-/// from the OTA RxState packet. On the RX side this is 0 when CRSF frames
-/// are flowing to the FC and climbs when the FC UART never accepts bytes.
+/// Returns the far end's CRSF TX-failure rate. No longer carried in the
+/// RxState packet (see getRemotePacketQuality); currently always 0.
 uint16_t getRemoteCrsfTxFailureRateHz();
 
-/// Returns the far end's RC packet rate (RC frames/s it received over the
-/// radio and fed to its CRSF output), from the OTA RxState packet. >0
-/// confirms the RX is decoding RC and building CRSF frames at all.
+/// Returns the far end's RC packet rate. No longer carried in the RxState
+/// packet (see getRemotePacketQuality); currently always 0.
 uint16_t getRemoteRcPacketRateHz();
+
+// ── Far-end (RX-side) debug diagnostics, from the OTA RxState packet ──
+// Shown on the TX-side Lua config menu. All are the values the far end last
+// reported; 0 until an RxState packet has been received from it.
+
+/// Far end's FHSS desync counter (wrapping 16-bit).
+uint16_t getRemoteDesyncCount();
+/// Far end's runtime since boot, in whole minutes (wrapping 16-bit).
+uint16_t getRemoteRuntimeMinutes();
+/// Far end's current FHSS slot timing offset, in microseconds (signed).
+int16_t getRemoteFhssOffsetUs();
+/// Far end's current FHSS slot-interval clock-drift correction, in
+/// nanoseconds (signed; saturates at the int16 range).
+int16_t getRemoteIntervalOffsetNs();
+/// Far end's cumulative FHSS missed-slot (scheduling-latency) counter, from
+/// the OTA SlotStats packet.
+uint32_t getRemoteMissedSlots();
 
 } // namespace VCTR::ExVectrLink::datalink
 #endif // EXVECRLINK_DATALINKCOMMANDMANAGER_HPP
