@@ -337,6 +337,10 @@ void CRSFRcInput::handleParameterRead(
     sendRxMissedEntry(replyDest);
     return;
   }
+  if (req.parameterNumber == kSyncOffsetInfoParameterNumber) {
+    sendSyncOffsetInfoEntry(replyDest);
+    return;
+  }
 
   // COMMAND parameters (TX / RX upload mode). Reading a COMMAND resets it to
   // idle -- mirrors ExpressLRS's CRSFEndpoint::parameterUpdateReq() (READ of a
@@ -358,6 +362,51 @@ void CRSFRcInput::handleParameterRead(
     }
     sendCommandEntry(kRxUploadParameterNumber, "RX Upload Mode", rxUpload_,
                      replyDest);
+    return;
+  }
+  if (req.parameterNumber == kBlockTestParameterNumber) {
+    if (req.chunkNumber == 0) {
+      blockTest_.step = VCTR::packets::crsf::CRSFCommandStep::Ready;
+      blockTest_.info[0] = '\0';
+    }
+    sendCommandEntry(kBlockTestParameterNumber, "RX Block Test", blockTest_,
+                     replyDest);
+    return;
+  }
+  if (req.parameterNumber == kDesyncTestParameterNumber) {
+    if (req.chunkNumber == 0) {
+      desyncTest_.step = VCTR::packets::crsf::CRSFCommandStep::Ready;
+      desyncTest_.info[0] = '\0';
+    }
+    sendCommandEntry(kDesyncTestParameterNumber, "TX Desync Test", desyncTest_,
+                     replyDest);
+    return;
+  }
+  if (req.parameterNumber == kForceResyncParameterNumber) {
+    if (req.chunkNumber == 0) {
+      forceResync_.step = VCTR::packets::crsf::CRSFCommandStep::Ready;
+      forceResync_.info[0] = '\0';
+    }
+    sendCommandEntry(kForceResyncParameterNumber, "RX Force Search",
+                     forceResync_, replyDest);
+    return;
+  }
+  if (req.parameterNumber == kSyncOffsetIncParameterNumber) {
+    if (req.chunkNumber == 0) {
+      syncOffsetInc_.step = VCTR::packets::crsf::CRSFCommandStep::Ready;
+      syncOffsetInc_.info[0] = '\0';
+    }
+    sendCommandEntry(kSyncOffsetIncParameterNumber, "Sync Offset +100us",
+                     syncOffsetInc_, replyDest);
+    return;
+  }
+  if (req.parameterNumber == kSyncOffsetDecParameterNumber) {
+    if (req.chunkNumber == 0) {
+      syncOffsetDec_.step = VCTR::packets::crsf::CRSFCommandStep::Ready;
+      syncOffsetDec_.info[0] = '\0';
+    }
+    sendCommandEntry(kSyncOffsetDecParameterNumber, "Sync Offset -100us",
+                     syncOffsetDec_, replyDest);
     return;
   }
   // Any other parameter number: nothing to send -- see extern/CRSF details.md's
@@ -432,6 +481,70 @@ void CRSFRcInput::handleParameterWrite(
     handleUploadCommandWrite(
         rxUpload_, kRxUploadParameterNumber, "RX Upload Mode", "RX WiFi...",
         [this]() { triggerRxWifiUpload(); }, req.commandStatus, replyDest);
+    return;
+  }
+  if (req.parameterNumber == kBlockTestParameterNumber) {
+    // "RX Block Test": arm a delayed trigger (see DelayedTestAction) instead
+    // of relaying the OTA trigger immediately -- gives time to back out of
+    // this menu to the telemetry page before the far end's FHSS task
+    // actually blocks for 500 ms (see DatalinkCommandManager's PacketTypes::
+    // TestBlock handling).
+    handleUploadCommandWrite(
+        blockTest_, kBlockTestParameterNumber, "RX Block Test",
+        "Blocking in 10s...",
+        [this]() {
+          blockTestDelay_.trigger(kTestActionDelayNs,
+                                  [this]() { triggerRxBlockTest(); });
+        },
+        req.commandStatus, replyDest);
+    return;
+  }
+  if (req.parameterNumber == kDesyncTestParameterNumber) {
+    // "TX Desync Test": local only -- shifts THIS side's own FHSS channel
+    // and slot/role counters after the same delay. See
+    // FHSS::triggerCounterDesyncTest().
+    handleUploadCommandWrite(
+        desyncTest_, kDesyncTestParameterNumber, "TX Desync Test",
+        "Desyncing in 10s...",
+        [this]() {
+          desyncTestDelay_.trigger(kTestActionDelayNs, []() {
+            ExVectrLink::datalink::getFhss().triggerCounterDesyncTest();
+          });
+        },
+        req.commandStatus, replyDest);
+    return;
+  }
+  if (req.parameterNumber == kForceResyncParameterNumber) {
+    // "RX Force Search": arm a delayed trigger that relays the OTA trigger
+    // once it fires, desyncing the far end and forcing it straight into
+    // FHSSState::Searching (see DatalinkCommandManager's PacketTypes::
+    // TestForceResync handling).
+    handleUploadCommandWrite(
+        forceResync_, kForceResyncParameterNumber, "RX Force Search",
+        "Resyncing in 10s...",
+        [this]() {
+          forceResyncDelay_.trigger(kTestActionDelayNs,
+                                    [this]() { triggerRxForceResync(); });
+        },
+        req.commandStatus, replyDest);
+    return;
+  }
+  if (req.parameterNumber == kSyncOffsetIncParameterNumber) {
+    // "Sync Offset +100us": applied immediately, not through the delayed
+    // bench-test path above -- this is a real-time tuning control meant to
+    // be nudged while watching the telemetry page update.
+    handleUploadCommandWrite(
+        syncOffsetInc_, kSyncOffsetIncParameterNumber, "Sync Offset +100us",
+        "+100us...", [this]() { adjustRemoteSyncOffset(kSyncOffsetStepUs); },
+        req.commandStatus, replyDest);
+    return;
+  }
+  if (req.parameterNumber == kSyncOffsetDecParameterNumber) {
+    handleUploadCommandWrite(
+        syncOffsetDec_, kSyncOffsetDecParameterNumber, "Sync Offset -100us",
+        "-100us...",
+        [this]() { adjustRemoteSyncOffset(-(int16_t)kSyncOffsetStepUs); },
+        req.commandStatus, replyDest);
     return;
   }
 }
@@ -582,6 +695,18 @@ void CRSFRcInput::sendRxMissedEntry(uint8_t destAddress) {
   sendTelemetry(entry);
 }
 
+void CRSFRcInput::sendSyncOffsetInfoEntry(uint8_t destAddress) {
+  VCTR::packets::crsf::CRSFPacket_ParameterSettingsEntryInfo entry;
+  entry.destAddress = destAddress;
+  entry.parameterNumber = kSyncOffsetInfoParameterNumber;
+  strncpy(entry.name, "Sync Offset", sizeof(entry.name) - 1);
+  // Sourced only from the RX's own OTA telemetry -- see the member doc
+  // comment in CRSFRcInput.hpp for why this is never a locally-cached value.
+  snprintf(entry.info, sizeof(entry.info), "%u us",
+           (unsigned)ExVectrLink::datalink::getRemoteSyncOffsetUs());
+  sendTelemetry(entry);
+}
+
 void CRSFRcInput::sendDynPowerEnableEntry(uint8_t destAddress) {
   const auto &dynPower = ExVectrLink::datalink::getDynamicPower();
 
@@ -651,6 +776,48 @@ void CRSFRcInput::triggerRxWifiUpload() {
       (uint8_t)ExVectrLink::datalink::PacketTypes::UploadMode);
   ExVectrLink::datalink::queueOtaPacket(
       ExVectrLink::datalink::OtaSendKey::UploadModeTrigger, pkt);
+}
+
+void CRSFRcInput::triggerRxBlockTest() {
+  // One-shot bench-test trigger -- see PacketTypes::TestBlock's handling in
+  // DatalinkCommandManager.cpp. Only ever carries this single message, so
+  // coalescing repeated clicks is harmless.
+  VCTR::network::DataPacket pkt;
+  pkt.payload.append((uint8_t)ExVectrLink::datalink::PacketTypes::TestBlock);
+  ExVectrLink::datalink::queueOtaPacket(
+      ExVectrLink::datalink::OtaSendKey::TestBlockTrigger, pkt);
+}
+
+void CRSFRcInput::triggerRxForceResync() {
+  // One-shot bench-test trigger -- see PacketTypes::TestForceResync's
+  // handling in DatalinkCommandManager.cpp.
+  VCTR::network::DataPacket pkt;
+  pkt.payload.append(
+      (uint8_t)ExVectrLink::datalink::PacketTypes::TestForceResync);
+  ExVectrLink::datalink::queueOtaPacket(
+      ExVectrLink::datalink::OtaSendKey::TestForceResyncTrigger, pkt);
+}
+
+void CRSFRcInput::adjustRemoteSyncOffset(int16_t deltaUs) {
+  // Nudge from the RX's last reported value, not a locally-tracked target --
+  // so repeated clicks always start from where the RX actually is, even if
+  // an earlier write was lost or hasn't been applied yet.
+  const int32_t current =
+      (int32_t)ExVectrLink::datalink::getRemoteSyncOffsetUs();
+  int32_t next = current + deltaUs;
+  if (next < 0) {
+    next = 0;
+  } else if (next > kSyncOffsetMaxUs) {
+    next = kSyncOffsetMaxUs;
+  }
+  const uint16_t us = (uint16_t)next;
+
+  VCTR::network::DataPacket pkt;
+  pkt.payload.append((uint8_t)(us & 0xFF));
+  pkt.payload.append((uint8_t)((us >> 8) & 0xFF));
+  pkt.payload.append((uint8_t)ExVectrLink::datalink::PacketTypes::SetSyncOffset);
+  ExVectrLink::datalink::queueOtaPacket(
+      ExVectrLink::datalink::OtaSendKey::SyncOffsetTrigger, pkt);
 }
 
 void CRSFRcInput::registerTelemetryForwarding() {

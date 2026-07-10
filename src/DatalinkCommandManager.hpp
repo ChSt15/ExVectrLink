@@ -18,6 +18,12 @@ struct RemoteLinkStats {
   bool dynamicPower = false;
   int8_t rssi = 0; ///< dBm (negative)
   int8_t snr = 0;  ///< dB (-15 to +15)
+  /// Far end's current FHSS sync latency compensation (see
+  /// FHSS::getSyncLatencyCompensation()), microseconds, 0-2000 in 50us
+  /// steps -- true readback of the live value, not just the last commanded
+  /// one, so it still reflects reality if a write was lost or the far end
+  /// hasn't applied it yet.
+  uint16_t syncOffsetUs = 0;
   bool valid = false;
 };
 
@@ -44,6 +50,15 @@ enum class OtaSendKey : uint8_t {
                      ///< so coalescing repeated clicks is harmless.
   SlotStats,         ///< DatalinkCommandManager: FHSS missed-slot counter
                      ///< (see PacketTypes::SlotStats), sent once per second.
+  TestBlockTrigger,  ///< CRSFRcInput: one-shot "block for 500ms" bench-test
+                     ///< command relayed to the far end (see PacketTypes::
+                     ///< TestBlock).
+  TestForceResyncTrigger, ///< CRSFRcInput: one-shot "desync and force
+                          ///< Searching" bench-test command relayed to the
+                          ///< far end (see PacketTypes::TestForceResync).
+  SyncOffsetTrigger, ///< CRSFRcInput: one-shot "set FHSS sync latency
+                     ///< compensation" command relayed to the far end (see
+                     ///< PacketTypes::SetSyncOffset).
 };
 
 extern void
@@ -104,6 +119,11 @@ int16_t getRemoteIntervalOffsetNs();
 /// Far end's cumulative FHSS missed-slot (scheduling-latency) counter, from
 /// the OTA SlotStats packet.
 uint32_t getRemoteMissedSlots();
+
+/// Far end's current FHSS sync latency compensation, microseconds (0-2000,
+/// 50us resolution) -- see RemoteLinkStats::syncOffsetUs. 0 until a
+/// LinkTelemetry packet has been received from it.
+uint16_t getRemoteSyncOffsetUs();
 
 } // namespace VCTR::ExVectrLink::datalink
 #endif // EXVECRLINK_DATALINKCOMMANDMANAGER_HPP

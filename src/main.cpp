@@ -498,6 +498,35 @@ void IRAM_ATTR onRadioBDio1() {
 }
 #endif
 
+// Atomically drains one radio's ISR capture and converts it to a system
+// timestamp (ns). Returns 0 if no edge is pending. Shared by the main-loop
+// transfer (processDio1Interrupts) and the drivers' pull-time drain
+// (setDio1TimestampSource) so an RX_DONE edge that fires between the two is
+// never stamped with a late Core::NowNs() fallback.
+int64_t drainDio1Timestamp(volatile bool &fired, volatile uint32_t &isrTime) {
+  if (!fired) {
+    return 0;
+  }
+  noInterrupts();
+  uint32_t isrMicros = isrTime;
+  fired = false;
+  interrupts();
+  // Unsigned subtraction keeps the elapsed time correct even when micros()
+  // wraps roughly every 71 minutes.
+  uint32_t elapsedMicros = micros() - isrMicros;
+  return Core::NowNs() - int64_t(elapsedMicros) * Core::MICROSECONDS;
+}
+
+int64_t drainDio1TimestampA() {
+  return drainDio1Timestamp(dio1FiredA, dio1MicrosA);
+}
+
+#if defined(HAS_DIVERSITY)
+int64_t drainDio1TimestampB() {
+  return drainDio1Timestamp(dio1FiredB, dio1MicrosB);
+}
+#endif
+
 void setup() {
 
   // delay(5000);
@@ -602,8 +631,10 @@ void setup() {
   };
 
   radioSetup(radioA);
+  radioA.setDio1TimestampSource(drainDio1TimestampA);
 #if defined(HAS_DIVERSITY)
   radioSetup(radioB);
+  radioB.setDio1TimestampSource(drainDio1TimestampB);
 #endif
 
   ExVectrLink::datalink::getDynamicPower().setMaxPower(
@@ -620,29 +651,24 @@ void setup() {
 }
 
 void processDio1Interrupts() {
-  if (dio1FiredA && ExVectrLink::datalink::getDatalinkRadioA().isConfigured()) {
-    // Atomically read ISR-captured micros and clear flag
-    noInterrupts();
-    uint32_t isrMicros = dio1MicrosA;
-    dio1FiredA = false;
-    interrupts();
-    // Unsigned subtraction keeps the elapsed time correct even when micros()
-    // wraps roughly every 71 minutes.
-    uint32_t elapsedMicros = micros() - isrMicros;
-    int64_t timestamp =
-        Core::NowNs() - int64_t(elapsedMicros) * Core::MICROSECONDS;
-    ExVectrLink::datalink::getDatalinkRadioA().notifyDio1Irq(timestamp);
+  // force=true: with DIO1 masked to RX_DONE only, every edge is a packet
+  // end, so the latest edge is always the right one. Keep-first latching
+  // would let a stale timestamp (from an edge whose packet was already
+  // consumed via the pull-time drain) block the next packet's edge.
+  if (ExVectrLink::datalink::getDatalinkRadioA().isConfigured()) {
+    int64_t timestamp = drainDio1TimestampA();
+    if (timestamp != 0) {
+      ExVectrLink::datalink::getDatalinkRadioA().notifyDio1Irq(timestamp,
+                                                               true);
+    }
   }
 #if defined(HAS_DIVERSITY)
-  if (dio1FiredB && ExVectrLink::datalink::getDatalinkRadioB().isConfigured()) {
-    noInterrupts();
-    uint32_t isrMicros = dio1MicrosB;
-    dio1FiredB = false;
-    interrupts();
-    uint32_t elapsedMicros = micros() - isrMicros;
-    int64_t timestamp =
-        Core::NowNs() - int64_t(elapsedMicros) * Core::MICROSECONDS;
-    ExVectrLink::datalink::getDatalinkRadioB().notifyDio1Irq(timestamp);
+  if (ExVectrLink::datalink::getDatalinkRadioB().isConfigured()) {
+    int64_t timestamp = drainDio1TimestampB();
+    if (timestamp != 0) {
+      ExVectrLink::datalink::getDatalinkRadioB().notifyDio1Irq(timestamp,
+                                                               true);
+    }
   }
 #endif
 }

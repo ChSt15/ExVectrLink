@@ -101,6 +101,91 @@ private:
   UploadCommand txUpload_;
   UploadCommand rxUpload_;
 
+  // ── Bench-test COMMAND parameters (see FHSS::triggerCounterDesyncTest() /
+  // triggerFullResyncTest() and DatalinkCommandManager's PacketTypes::
+  // TestBlock/TestForceResync handling) ──
+  //   "RX Block Test"  -- relays an OTA trigger that blocks the far end's
+  //                       FHSS task for 500 ms, to exercise the in-flight-
+  //                       reception grace window / catch-up path under a
+  //                       real scheduling stall.
+  //   "TX Desync Test" -- local-only: shifts THIS side's own channel and
+  //                       slot/role counters, so the far end sees a suddenly
+  //                       shifted-but-still-valid trailer -- exercises the
+  //                       resync-on-agreement path in FHSS::receivePacket()
+  //                       without a full reacquisition.
+  //   "RX Force Search" -- relays an OTA trigger that does the same
+  //                       perturbation on the far end AND forces it straight
+  //                       to FHSSState::Searching, bypassing the multi-second
+  //                       desync timeout, for repeatable reacquisition tests.
+  static constexpr uint8_t kBlockTestParameterNumber = 13;
+  static constexpr uint8_t kDesyncTestParameterNumber = 14;
+  static constexpr uint8_t kForceResyncParameterNumber = 15;
+  UploadCommand blockTest_;
+  UploadCommand desyncTest_;
+  UploadCommand forceResync_;
+  void triggerRxBlockTest();
+  void triggerRxForceResync();
+
+  // Runs `action` once, a fixed delay after trigger() is called, then parks
+  // itself (release = Core::END_OF_TIME, so the scheduler never selects it)
+  // until triggered again. Used to defer the three bench-test actions above:
+  // without this, the disruptive event (block/desync/force-search) happens
+  // the instant the Lua command is clicked, with no time to back out of the
+  // menu and switch to the telemetry page first to actually watch it happen.
+  class DelayedTestAction : public Core::Scheduler::Task {
+  public:
+    explicit DelayedTestAction(const char *name) : Core::Scheduler::Task(name) {
+      setRelease(Core::END_OF_TIME);
+      Core::getSystemScheduler().addTask(*this);
+    }
+
+    void trigger(int64_t delayNs, std::function<void()> action) {
+      action_ = std::move(action);
+      const int64_t runAt = Core::NowNs() + delayNs;
+      setDeadline(runAt);
+      setRelease(runAt);
+    }
+
+    void taskThread() override {
+      if (action_) {
+        auto action = std::move(action_);
+        action_ = nullptr;
+        action();
+      }
+      // Park until triggered again -- see class doc comment.
+      setRelease(Core::END_OF_TIME);
+    }
+
+  private:
+    std::function<void()> action_;
+  };
+
+  static constexpr int64_t kTestActionDelayNs = 10 * Core::SECONDS;
+  DelayedTestAction blockTestDelay_{"RxBlockTestDelay"};
+  DelayedTestAction desyncTestDelay_{"TxDesyncTestDelay"};
+  DelayedTestAction forceResyncDelay_{"RxForceResyncDelay"};
+
+  // ── RX Sync Offset tuning (see FHSS::setSyncLatencyCompensation() /
+  // PacketTypes::SetSyncOffset) ──
+  // "Sync Offset" is a read-only INFO field showing the RX side's current
+  // value, sourced ONLY from its OTA LinkTelemetry reports (getRemote
+  // SyncOffsetUs()) -- never a locally-cached "last commanded" value -- so
+  // it always reflects what the RX is actually using, not what was merely
+  // requested. The two buttons nudge it by +/-100us: each click reads that
+  // same live remote value, adds/subtracts one step, and relays the new
+  // absolute target immediately (no bench-test-style delay -- this is meant
+  // for real-time tuning while watching the telemetry page, so instant
+  // feedback is the point).
+  static constexpr uint8_t kSyncOffsetInfoParameterNumber = 16;
+  static constexpr uint8_t kSyncOffsetIncParameterNumber = 17;
+  static constexpr uint8_t kSyncOffsetDecParameterNumber = 18;
+  static constexpr uint16_t kSyncOffsetStepUs = 100;
+  static constexpr uint16_t kSyncOffsetMaxUs = 2000;
+  UploadCommand syncOffsetInc_;
+  UploadCommand syncOffsetDec_;
+  void sendSyncOffsetInfoEntry(uint8_t destAddress);
+  void adjustRemoteSyncOffset(int16_t deltaUs);
+
   // Read-only INFO parameter showing this TX module's own chip temperature.
   // Sampled fresh each time the field is actually read (menu opened/
   // reloaded) rather than on a timer -- the CRSF parameter protocol has no

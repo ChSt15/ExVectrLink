@@ -89,6 +89,8 @@ int16_t getRemoteIntervalOffsetNs() { return rxIntervalOffsetNs; }
 
 uint32_t getRemoteMissedSlots() { return rxMissedSlots; }
 
+uint16_t getRemoteSyncOffsetUs() { return remoteStats.syncOffsetUs; }
+
 // ---------------------------------------------------------------------------
 // Shared outgoing OTA queue -- see OtaPacketQueue.hpp / OtaSendKey. Every
 // independent state-like sender (RC channels, link stats, telemetry relay,
@@ -206,9 +208,17 @@ static uint8_t quantizeLinkQualityPercent(float lq) {
   return (uint8_t)(clamped * 100.0f + 0.5f);
 }
 
+// Byte 4 layout: [0] dynamicPower, [6:1] sync offset step (0-40, 50us each,
+// 0-2000us), [7] spare.
+static uint8_t syncOffsetUsToStep(uint16_t syncOffsetUs) {
+  uint16_t clamped = syncOffsetUs > 2000 ? 2000 : syncOffsetUs;
+  uint8_t step = (uint8_t)((clamped + 25) / 50); // round to nearest step
+  return step > 40 ? 40 : step;
+}
+
 static void encodeLinkInfo(uint8_t antenna, float lq, int8_t txPowerdBm,
                            int16_t rssi, float snr, bool dynamicPower,
-                           uint8_t out[5]) {
+                           uint16_t syncOffsetUs, uint8_t out[5]) {
   uint8_t antVal = antenna & 0x07;
   uint8_t lqVal = quantizeLinkQualityPercent(lq);
   int8_t pwr = txPowerdBm < 1 ? 1 : (txPowerdBm > 32 ? 32 : txPowerdBm);
@@ -217,17 +227,18 @@ static void encodeLinkInfo(uint8_t antenna, float lq, int8_t txPowerdBm,
   uint8_t rssiVal = (uint8_t)(mag > 127 ? 127 : mag);
   float snrC = snr < -15.0f ? -15.0f : (snr > 15.0f ? 15.0f : snr);
   uint8_t snrVal = (uint8_t)(snrC + 15.0f + 0.5f) & 0x1F;
+  uint8_t syncStep = syncOffsetUsToStep(syncOffsetUs);
 
   out[0] = (uint8_t)((antVal << 5) | (lqVal >> 2));
   out[1] = (uint8_t)(((lqVal & 0x03) << 6) | (pwrVal << 1));
   out[2] = rssiVal;
   out[3] = (uint8_t)(snrVal << 3);
-  out[4] = dynamicPower ? 0x01 : 0x00;
+  out[4] = (uint8_t)((dynamicPower ? 0x01 : 0x00) | (syncStep << 1));
 }
 
 static void decodeLinkInfo(const uint8_t in[5], uint8_t &antenna, float &lq,
                            int8_t &txPowerdBm, int8_t &rssi, float &snr,
-                           bool &dynamicPower) {
+                           bool &dynamicPower, uint16_t &syncOffsetUs) {
   antenna = (in[0] >> 5) & 0x07;
   uint8_t lqRaw = (uint8_t)(((in[0] & 0x1F) << 2) | ((in[1] >> 6) & 0x03));
   lq = (float)lqRaw / 100.0f;
@@ -236,6 +247,11 @@ static void decodeLinkInfo(const uint8_t in[5], uint8_t &antenna, float &lq,
   uint8_t snrRaw = (in[3] >> 3) & 0x1F;
   snr = (float)snrRaw - 15.0f;
   dynamicPower = (in[4] & 0x01) != 0;
+  uint8_t syncStep = (in[4] >> 1) & 0x3F;
+  if (syncStep > 40) {
+    syncStep = 40;
+  }
+  syncOffsetUs = (uint16_t)syncStep * 50;
 }
 
 // The 8-byte OTA RxState payload -- far-end (RX-side) debug diagnostics shown
@@ -394,6 +410,8 @@ public:
     encodeLinkInfo(linkInfoPacket.local.antenna, getFhss().getLinkQuality(),
                    localTxPowerdBm, linkInfoPacket.local.rssi,
                    linkInfoPacket.local.snr, linkInfoPacket.local.dynamicPower,
+                   (uint16_t)(getFhss().getSyncLatencyCompensation() /
+                              Core::MICROSECONDS),
                    payload);
 
     network::DataPacket otaPkt;
@@ -554,8 +572,9 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
       int8_t remTxPwr;
       uint8_t remAnt;
       bool remDynamicPower;
+      uint16_t remSyncOffsetUs;
       decodeLinkInfo(packet.payload.getPtr(), remAnt, lq, remTxPwr, remRssi,
-                     snrF, remDynamicPower);
+                     snrF, remDynamicPower, remSyncOffsetUs);
       const uint8_t remLqPercent = quantizeLinkQualityPercent(lq);
 
       updateDynamicPowerFromRemoteLinkInfo(remRssi, (int8_t)snrF, remLqPercent);
@@ -567,6 +586,7 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
       remoteStats.snr = (int8_t)snrF;
       remoteStats.valid = true;
       remoteStats.dynamicPower = remDynamicPower;
+      remoteStats.syncOffsetUs = remSyncOffsetUs;
 
     } else if (pktType == (uint8_t)PacketTypes::RxState) {
 
@@ -591,6 +611,25 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
     } else if (pktType == (uint8_t)PacketTypes::UploadMode) {
       // OTA upload mode packet -- forward to serial host.
       VCTR::WifiUpload::startWiFiUploadMode();
+    } else if (pktType == (uint8_t)PacketTypes::TestBlock) {
+      // Deliberately blocks right here, inside the FHSS receive-handler
+      // callback (called from FHSS::taskThread()), so the stall looks like a
+      // real scheduling hiccup on this side -- e.g. testing whether the
+      // in-flight-reception grace window and the missed-slot catch-up path
+      // recover cleanly afterwards.
+      delay(500);
+    } else if (pktType == (uint8_t)PacketTypes::TestForceResync) {
+      getFhss().triggerFullResyncTest();
+    } else if (pktType == (uint8_t)PacketTypes::SetSyncOffset) {
+      // 2-byte little-endian microseconds, 0-2000 (see PacketTypes::
+      // SetSyncOffset). Applied straight to this side's own FHSS -- meant
+      // for the RX side; harmless (unused) if received on the TX side.
+      if (packet.payload.size() >= 3) {
+        const uint16_t us = (uint16_t)packet.payload[0] |
+                            ((uint16_t)packet.payload[1] << 8);
+        const uint16_t clampedUs = us > 2000 ? 2000 : us;
+        getFhss().setSyncLatencyCompensation(clampedUs * Core::MICROSECONDS);
+      }
     }
     // Other types are silently ignored for now.
   });
