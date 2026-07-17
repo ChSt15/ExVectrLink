@@ -91,16 +91,12 @@ int8_t getLocalTxPowerdBm();
 /// Returns the most recently decoded far-end link stats (from OTA LinkInfo).
 const RemoteLinkStats &getRemoteLinkStats();
 
-/// Returns the far end's packet quality (0-100 %). No longer carried in the
-/// RxState packet (dropped for the debug fields below); currently always 0.
-uint8_t getRemotePacketQuality();
-
 /// Returns the far end's CRSF TX-failure rate. No longer carried in the
-/// RxState packet (see getRemotePacketQuality); currently always 0.
+/// RxState packet (dropped for the debug fields below); currently always 0.
 uint16_t getRemoteCrsfTxFailureRateHz();
 
 /// Returns the far end's RC packet rate. No longer carried in the RxState
-/// packet (see getRemotePacketQuality); currently always 0.
+/// packet (see getRemoteCrsfTxFailureRateHz); currently always 0.
 uint16_t getRemoteRcPacketRateHz();
 
 // ── Far-end (RX-side) debug diagnostics, from the OTA RxState packet ──

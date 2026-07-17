@@ -329,11 +329,10 @@ public:
     lastRxPacketCount_ = rxCount;
     lastTxPacketCount_ = txCount;
 
-    Serial.printf("[%9.3f s] LQ:%3.0f%% PQ:%3.0f%% | RX pkts:%lu (%lu Hz) | TX "
+    Serial.printf("[%9.3f s] LQ:%3.0f%% | RX pkts:%lu (%lu Hz) | TX "
                   "pkts:%lu (%lu Hz)\n",
                   (double)Core::NowNs() / (double)Core::SECONDS,
                   (double)(fhss.getLinkQuality() * 100.0f),
-                  (double)(fhss.getPacketQuality() * 100.0f),
                   (unsigned long)rxCount, (unsigned long)rxRate,
                   (unsigned long)txCount, (unsigned long)txRate);
 
@@ -342,18 +341,15 @@ public:
     // physical side (RX or TX module) this firmware is running on, these
     // two lines together cover both ends of the link.
     const auto &remote = ExVectrLink::datalink::getRemoteLinkStats();
-    Serial.printf("             Local  LQ:%3.0f%% PQ:%3.0f%% RSSI:%4d SNR:%3d "
+    Serial.printf("             Local  LQ:%3.0f%% RSSI:%4d SNR:%3d "
                   "TXpwr:%3d dBm\n",
                   (double)(fhss.getLinkQuality() * 100.0f),
-                  (double)(fhss.getPacketQuality() * 100.0f),
                   radioA.getPacketRSSI(), radioA.getPacketSNR(),
                   ExVectrLink::datalink::getLocalTxPowerdBm());
-    Serial.printf("             Remote LQ:%3d%% PQ:%3d%% RSSI:%4d SNR:%3d "
+    Serial.printf("             Remote LQ:%3d%% RSSI:%4d SNR:%3d "
                   "TXpwr:%3d dBm%s\n",
-                  remote.linkQuality,
-                  ExVectrLink::datalink::getRemotePacketQuality(), remote.rssi,
-                  remote.snr, remote.txPowerdBm,
-                  remote.valid ? "" : " (no data yet)");
+                  remote.linkQuality, remote.rssi, remote.snr,
+                  remote.txPowerdBm, remote.valid ? "" : " (no data yet)");
     // Remote (RX-side) CRSF -> flight controller health.
     //  RC rate  >0  => RX is decoding RC and building CRSF frames.
     //  fail rate 0  => those frames are being written to the FC UART OK

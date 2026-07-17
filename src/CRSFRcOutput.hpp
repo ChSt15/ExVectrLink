@@ -14,6 +14,7 @@
 
 #include "CRSF.hpp"
 #include "DatalinkCommandManager.hpp"
+#include "RcLinkChannels.hpp"
 
 namespace VCTR::ExVectrLink {
 
@@ -52,9 +53,15 @@ private:
   CRSF crsf_;
 
   VCTR::packets::PacketManager packetManager_;
-  VCTR::packets::radiolink::RadioLinkPacket_A4D4 packet_;
+  /// Accumulates the newest value of every RC channel out of the incoming
+  /// RcLinkPackets (priority channels every packet, one multiplexed aux
+  /// channel per packet -- see RcLinkChannels.hpp).
+  RcLinkAccumulator rcAccumulator_;
+  /// Glitch filter over the accumulated full channel set. The LinkType tag
+  /// on the filter's internal packet is inert -- it is never serialized.
   VCTR::packets::radiolink::RadioLinkPacketFilter<
-      4, 4, VCTR::packets::radiolink::RadioLinkTypes::A4D4>
+      kRcPriorityAnalog + kRcMuxAnalog, kRcPriorityDigital + kRcMuxDigital,
+      VCTR::packets::radiolink::RadioLinkTypes::A4D0>
       packetFilter_;
   int64_t lastPacketTime_ = 0;
   bool newRcPacket_ = false;

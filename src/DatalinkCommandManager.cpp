@@ -36,7 +36,6 @@ uint32_t rxMissedSlots = 0;
 // fields above -- the OTA frame only holds 8 data bytes). Kept so existing
 // consumers still compile; they now read a constant 0.
 uint16_t rxPacketRateHz = 0;
-uint8_t rxPacketQuality = 0;
 uint16_t rxCrsfTxFailures = 0;
 
 /// Decoded far-end link stats from the last received OTA LinkInfo packet.
@@ -73,8 +72,6 @@ const RemoteLinkStats &getRemoteLinkStats() {
   return remoteStats;
 }
 
-uint8_t getRemotePacketQuality() { return rxPacketQuality; }
-
 uint16_t getRemoteCrsfTxFailureRateHz() { return rxCrsfTxFailures; }
 
 uint16_t getRemoteRcPacketRateHz() { return rxPacketRateHz; }
@@ -100,6 +97,10 @@ uint16_t getRemoteSyncOffsetUs() { return remoteStats.syncOffsetUs; }
 // ---------------------------------------------------------------------------
 
 static OtaPacketQueue<8> otaSendQueue;
+
+// Defined below (needs encodeLinkInfo & friends); used by OtaQueuePump as
+// the empty-queue filler.
+static VCTR::network::DataPacket buildLinkTelemetryOtaPacket();
 
 bool queueOtaPacket(OtaSendKey key, const VCTR::network::DataPacket &packet) {
   return otaSendQueue.updateQueue((uint8_t)key, packet);
@@ -131,7 +132,11 @@ public:
     uint8_t key;
     network::DataPacket packet;
     if (!otaSendQueue.dequeue(key, packet)) {
-      return; // Nothing queued.
+      // Nothing queued: fill the free slot with a fresh link-statistics
+      // packet instead of letting an empty frame go out, so the link
+      // always carries data when there is any to carry.
+      getFhss().transmitDataframe(buildLinkTelemetryOtaPacket());
+      return;
     }
     if (!getFhss().transmitDataframe(packet)) {
       // Shouldn't normally happen right after isChannelBlocked() said
@@ -149,10 +154,6 @@ static uint16_t getLocalRcPacketRateHz() {
 #else
   return 0;
 #endif
-}
-
-static uint8_t getLocalPacketQualityPercent() {
-  return quantizeLinkQualityPercent(getFhss().getPacketQuality());
 }
 
 static uint16_t getLocalCrsfTxFailureRateHz() {
@@ -319,6 +320,29 @@ static uint8_t getLocalTxAntennaIndex() {
 #endif
 }
 
+/// Builds an OTA LinkTelemetry packet from the current local link state.
+/// Shared by LinkInfoSender's fixed 2 Hz high-priority send and
+/// OtaQueuePump's empty-queue filler.
+static VCTR::network::DataPacket buildLinkTelemetryOtaPacket() {
+  const auto &radio = getLinkStatsRadio();
+
+  uint8_t payload[8] = {};
+  encodeLinkInfo(getLocalTxAntennaIndex(), getFhss().getLinkQuality(),
+                 getLocalTxPowerdBm(), radio.getPacketRSSI(),
+                 (float)radio.getPacketSNR(),
+                 getDynamicPower().isDynamicPowerEnabled(),
+                 (uint16_t)(getFhss().getSyncLatencyCompensation() /
+                            Core::MICROSECONDS),
+                 payload);
+
+  network::DataPacket otaPkt;
+  for (size_t i = 0; i < 8; i++) {
+    otaPkt.payload.append(payload[i]);
+  }
+  otaPkt.payload.append((uint8_t)PacketTypes::LinkTelemetry);
+  return otaPkt;
+}
+
 class LinkInfoSender : public VCTR::Core::Task_Periodic {
 
   int64_t lastLinkTelemetrySendTime = 0;
@@ -329,7 +353,9 @@ class LinkInfoSender : public VCTR::Core::Task_Periodic {
   // timed independently of -- and sent at a fixed 2 Hz regardless of --
   // RxState/SlotStats below, and queued via queueOtaPacketFront() so it
   // jumps ahead of any backlog of lower-priority OTA traffic (CRSF sensor
-  // relay, RC channels, ...) instead of going stale behind it.
+  // relay, ...) instead of going stale behind it. On top of this baseline,
+  // OtaQueuePump sends an extra LinkTelemetry whenever the OTA queue runs
+  // empty, so idle slots still carry fresh link stats.
   static constexpr int64_t kLinkTelemetryIntervalNs = 500 * Core::MILLISECONDS;
   static constexpr int64_t kRxStateIntervalNs = 1000 * Core::MILLISECONDS;
 
@@ -372,7 +398,9 @@ public:
         quantizeLinkQualityPercent(getFhss().getLinkQuality());
     linkInfoPacket.local.linkQuality = localLinkQuality;
     linkInfoPacket.local.lossRate = (uint8_t)(100 - localLinkQuality);
-    linkInfoPacket.local.packetQuality = getLocalPacketQualityPercent();
+    // Same value as linkQuality -- kept only for serial wire-format
+    // compatibility with existing hosts.
+    linkInfoPacket.local.packetQuality = localLinkQuality;
     const int8_t localTxPowerdBm = getLocalTxPowerdBm();
     linkInfoPacket.local.txPower = localTxPowerdBm;
     linkInfoPacket.local.dynamicPower = dynamicPower.isDynamicPowerEnabled();
@@ -386,7 +414,7 @@ public:
     linkInfoPacket.remote.antenna = remoteStats.antenna;
     linkInfoPacket.remote.linkQuality = remoteStats.linkQuality;
     linkInfoPacket.remote.lossRate = (uint8_t)(100 - remoteStats.linkQuality);
-    linkInfoPacket.remote.packetQuality = rxPacketQuality;
+    linkInfoPacket.remote.packetQuality = remoteStats.linkQuality;
     linkInfoPacket.remote.txPower = remoteStats.txPowerdBm;
     linkInfoPacket.remote.dynamicPower = remoteStats.dynamicPower;
     linkInfoPacket.remote.desyncCount = rxDesyncCount;
@@ -406,20 +434,8 @@ public:
     serialTelecomsPtr->sendSerialPacket(linkInfoPacket);
 
     // Also broadcast our link stats to the other end over-the-air.
-    uint8_t payload[8];
-    encodeLinkInfo(linkInfoPacket.local.antenna, getFhss().getLinkQuality(),
-                   localTxPowerdBm, linkInfoPacket.local.rssi,
-                   linkInfoPacket.local.snr, linkInfoPacket.local.dynamicPower,
-                   (uint16_t)(getFhss().getSyncLatencyCompensation() /
-                              Core::MICROSECONDS),
-                   payload);
-
-    network::DataPacket otaPkt;
-    for (size_t i = 0; i < 8; i++) {
-      otaPkt.payload.append(payload[i]);
-    }
-    otaPkt.payload.append((uint8_t)PacketTypes::LinkTelemetry);
-    queueOtaPacketFront(OtaSendKey::LinkTelemetry, otaPkt);
+    queueOtaPacketFront(OtaSendKey::LinkTelemetry,
+                        buildLinkTelemetryOtaPacket());
   }
 
   void sendRxStatePacket() {
@@ -530,6 +546,20 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
         // getFhss().enableFhss(packet.enable);
         getFhss().setFhssKey(packet.seqKey);
       });
+
+  // Any valid FHSS packet -- with or without payload data -- proves the far
+  // end is still transmitting. The receive handler below only fires for
+  // data-carrying packets, so empty keep-alive frames alone would let
+  // remoteStats time out (see REMOTE_LINK_STATS_TIMEOUT_NS) and the CRSF
+  // link stats sent to the handset would report uplink LQ/RSSI of 0 --
+  // read as "connection lost" -- despite perfect slot reception.
+  getFhss().addSlotHandler([](datalink::FHSSSlotEvent event, bool isRxSlot,
+                              bool receivedPacket, datalink::FHSSState) {
+    if (event == datalink::FHSSSlotEvent::SlotEnd && isRxSlot &&
+        receivedPacket) {
+      lastRemotePacketNs = Core::NowNs();
+    }
+  });
 
   // Receiving info from far end over FHSS
   getFhss().addReceiveHandler([&serialTelecoms](

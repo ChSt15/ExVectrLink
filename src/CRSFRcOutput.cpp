@@ -102,17 +102,16 @@ void CRSFRcOutput::taskInit() {
         packetManager_.receivePacketData(stripped);
       });
 
-  packetManager_
-      .addPacketReceiveHandler<VCTR::packets::radiolink::RadioLinkPacket_A4D4>(
-          [this](const VCTR::packets::radiolink::RadioLinkPacket_A4D4 &packet) {
-            const int64_t nowNs = Core::NowNs();
-            packet_ = packet;
-            newRcPacket_ = true;
-            lastPacketTime_ = nowNs;
-            noteRcPacketReceived(nowNs);
-            // Wake up the task immediately so we output the frame ASAP.
-            this->setDeadline(nowNs);
-          });
+  packetManager_.addPacketReceiveHandler<RcLinkPacket>(
+      [this](const RcLinkPacket &packet) {
+        const int64_t nowNs = Core::NowNs();
+        rcAccumulator_.updateFromPacket(packet, nowNs);
+        newRcPacket_ = true;
+        lastPacketTime_ = nowNs;
+        noteRcPacketReceived(nowNs);
+        // Wake up the task immediately so we output the frame ASAP.
+        this->setDeadline(nowNs);
+      });
 
   packetManager_
       .addPacketReceiveHandler<VCTR::packets::telecoms::Telecommand_UpdateMode>(
@@ -248,7 +247,14 @@ uint16_t CRSFRcOutput::normToCrsf(int16_t val) {
 }
 
 void CRSFRcOutput::writeRcChannelsFrame() {
-  packetFilter_.updateFromPacket(packet_, lastPacketTime_);
+  // Collapse the accumulated per-channel state into one full packet for the
+  // glitch filter (the LinkType tag is inert -- it is never serialized).
+  VCTR::packets::radiolink::RadioLinkPacket<
+      kRcPriorityAnalog + kRcMuxAnalog, kRcPriorityDigital + kRcMuxDigital,
+      VCTR::packets::radiolink::RadioLinkTypes::A4D0>
+      full;
+  rcAccumulator_.fillPacket(full);
+  packetFilter_.updateFromPacket(full, lastPacketTime_);
   const auto &f = packetFilter_.getFilteredPacket();
 
   VCTR::packets::crsf::CRSFPacket_RcChannelsPacked pkt;
@@ -262,19 +268,13 @@ void CRSFRcOutput::writeRcChannelsFrame() {
   pkt.channels[2] = normToCrsf(f.analogChannels[3]); // Throttle
   pkt.channels[3] = normToCrsf(f.analogChannels[2]); // Yaw
 
-  // Digital channels (same mapping as SBusTx/CRSFOutput)
-  pkt.channels[4] =
-      (float)f.digitalChannels[0] / 2 * (CRSF_CHANNEL_MAX - CRSF_CHANNEL_MIN) +
-      CRSF_CHANNEL_MIN;
-  pkt.channels[5] =
-      (float)f.digitalChannels[1] / 2 * (CRSF_CHANNEL_MAX - CRSF_CHANNEL_MIN) +
-      CRSF_CHANNEL_MIN;
-  pkt.channels[6] =
-      (float)f.digitalChannels[2] / 2 * (CRSF_CHANNEL_MAX - CRSF_CHANNEL_MIN) +
-      CRSF_CHANNEL_MIN;
-  pkt.channels[7] =
-      (float)f.digitalChannels[3] / 2 * (CRSF_CHANNEL_MAX - CRSF_CHANNEL_MIN) +
-      CRSF_CHANNEL_MIN;
+  // Digital channels (same mapping as SBusTx/CRSFOutput): 0 = aux1
+  // (priority), 1-5 = aux2-aux6 (multiplexed) -> CRSF ch 4-9.
+  for (size_t i = 0; i < kRcPriorityDigital + kRcMuxDigital; i++) {
+    pkt.channels[4 + i] = (float)f.digitalChannels[i] / 2 *
+                              (CRSF_CHANNEL_MAX - CRSF_CHANNEL_MIN) +
+                          CRSF_CHANNEL_MIN;
+  }
 
   if (!crsf_.write(pkt)) {
     noteCrsfTxFailure(Core::NowNs());
@@ -288,8 +288,7 @@ void CRSFRcOutput::writeLinkStatsFrame() {
   // directly, so uplink RSSI/SNR/LQ come from our own local radio readings.
   const int16_t rssiRaw = radio.getPacketRSSI();
   const int16_t snrRaw = radio.getPacketSNR();
-  const float lq = datalink::getFhss().getLinkQuality();        // 0.0 – 1.0
-  const float packetQ = datalink::getFhss().getPacketQuality(); // 0.0 – 1.0
+  const float lq = datalink::getFhss().getLinkQuality(); // 0.0 – 1.0
 
   const uint8_t uplinkRssi = (rssiRaw < 0) ? (uint8_t)(-rssiRaw) : (uint8_t)0;
 
@@ -330,7 +329,7 @@ void CRSFRcOutput::writeLinkStatsFrame() {
   pkt.rfProfile = 4;                        // RF mode (generic)
   pkt.upRfPower = txPowerIdx;
   pkt.downRssi = 0;                         // downlink (FC->RX) N/A here
-  pkt.downLinkQuality = (uint8_t)(packetQ * 100.0f);
+  pkt.downLinkQuality = (uint8_t)(lq * 100.0f);
   pkt.downSnr = 0;
 
   if (!crsf_.write(pkt)) {

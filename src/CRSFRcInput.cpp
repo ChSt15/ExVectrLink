@@ -908,20 +908,23 @@ uint8_t CRSFRcInput::digitalFromCrsf(uint16_t val) {
 
 void CRSFRcInput::forwardRcChannels(
     const VCTR::packets::crsf::CRSFPacket_RcChannelsPacked &pkt) {
-  VCTR::packets::radiolink::RadioLinkPacket_A4D4 packet;
+  // Refresh the commander's full channel state from the CRSF frame; it
+  // decides what each packet carries (priority channels every packet, one
+  // multiplexed aux channel per packet -- see RcLinkChannels.hpp).
 
   // Analogue channels (inverse of CRSFRcOutput::writeRcChannelsFrame mapping)
-  packet.analogChannels[0] = crsfToNorm(pkt.channels[0]); // Roll
-  packet.analogChannels[1] = crsfToNorm(pkt.channels[1]); // Pitch
-  packet.analogChannels[3] = crsfToNorm(pkt.channels[2]); // Throttle
-  packet.analogChannels[2] = crsfToNorm(pkt.channels[3]); // Yaw
+  rcCommander_.setAnalogChannel(0, crsfToNorm(pkt.channels[0])); // Roll
+  rcCommander_.setAnalogChannel(1, crsfToNorm(pkt.channels[1])); // Pitch
+  rcCommander_.setAnalogChannel(3, crsfToNorm(pkt.channels[2])); // Throttle
+  rcCommander_.setAnalogChannel(2, crsfToNorm(pkt.channels[3])); // Yaw
 
-  // Digital channels (inverse of CRSFRcOutput's mapping)
-  packet.digitalChannels[0] = digitalFromCrsf(pkt.channels[4]);
-  packet.digitalChannels[1] = digitalFromCrsf(pkt.channels[5]);
-  packet.digitalChannels[2] = digitalFromCrsf(pkt.channels[6]);
-  packet.digitalChannels[3] = digitalFromCrsf(pkt.channels[7]);
+  // Digital channels (inverse of CRSFRcOutput's mapping): 0 = aux1
+  // (priority), 1-5 = aux2-aux6 (multiplexed).
+  for (size_t i = 0; i < RcLinkCommander::kNumDigitalChannels; i++) {
+    rcCommander_.setDigitalChannel(i, digitalFromCrsf(pkt.channels[4 + i]));
+  }
 
+  const RcLinkPacket packet = rcCommander_.buildNextPacket();
   lastRcPacket_ = packet;
   lastRcPacketTime_ = Core::NowNs();
   rcFrameCount_++;

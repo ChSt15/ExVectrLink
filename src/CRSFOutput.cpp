@@ -317,8 +317,7 @@ void CRSFOutput::writeLinkStatsFrame() {
   // Always use local radio readings for uplink stats.
   const int16_t rssiRaw = radio.getPacketRSSI();
   const int16_t snrRaw = radio.getPacketSNR();
-  const float lq = datalink::getFhss().getLinkQuality();        // 0.0 – 1.0
-  const float packetQ = datalink::getFhss().getPacketQuality(); // 0.0 – 1.0
+  const float lq = datalink::getFhss().getLinkQuality(); // 0.0 – 1.0
 
   const uint8_t uplinkRssi = (rssiRaw < 0) ? (uint8_t)(-rssiRaw) : (uint8_t)0;
 
@@ -362,7 +361,7 @@ void CRSFOutput::writeLinkStatsFrame() {
   pkt.rfProfile = 4;                        // RF mode (generic)
   pkt.upRfPower = txPowerIdx;               // uplink TX power index (remote TX side)
   pkt.downRssi = 0;                         // downlink RSSI (N/A on RX side)
-  pkt.downLinkQuality = (uint8_t)(packetQ * 100.0f); // repurpose unused downlink LQ
+  pkt.downLinkQuality = (uint8_t)(lq * 100.0f); // repurpose unused downlink LQ
   pkt.downSnr = 0;                          // downlink SNR (N/A on RX side)
 
   uint8_t frame[14];

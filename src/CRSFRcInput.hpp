@@ -15,13 +15,16 @@
 #include "ExVectrPackets/telecoms/packets/Telemetry.hpp"
 
 #include "CRSF.hpp"
+#include "RcLinkChannels.hpp"
 
 namespace VCTR::ExVectrLink {
 
 /**
  * @brief Receives CRSF RC_CHANNELS_PACKED frames from a handset's external
  * module bay, built on the generic CRSF class, and forwards them over the
- * FHSS radio link as RadioLinkPacket_A4D4 packets.
+ * FHSS radio link as RcLinkPacket (RadioLinkMuxPacket) packets: sticks and
+ * aux1 in every packet, aux2-aux6 multiplexed one per packet (see
+ * RcLinkChannels.hpp for the channel layout).
  *
  * This is the first step of moving CRSFInput's responsibilities onto the
  * new CRSF system: only RC-channel input is handled here. Telemetry-out and
@@ -55,7 +58,11 @@ private:
 
   CRSF crsf_;
 
-  VCTR::packets::radiolink::RadioLinkPacket_A4D4 lastRcPacket_{};
+  /// Holds the live value of every RC channel and rotates the multiplexed
+  /// aux slot; forwardRcChannels() refreshes it from each CRSF frame and
+  /// sends its next packet.
+  RcLinkCommander rcCommander_{};
+  RcLinkPacket lastRcPacket_{};
   int64_t lastRcPacketTime_ = 0;
   uint32_t rcFrameCount_ = 0;
 
@@ -323,11 +330,9 @@ public:
   // byte-level diagnostics (raw snapshot, CRC error/resync counters) not
   // ported here yet.
 
-  /// @returns the most recently decoded RC channels packet.
-  const VCTR::packets::radiolink::RadioLinkPacket_A4D4 &
-  getLastRcPacket() const {
-    return lastRcPacket_;
-  }
+  /// @returns the most recently sent RC channels packet (priority channels
+  /// plus whichever multiplexed aux channel that packet carried).
+  const RcLinkPacket &getLastRcPacket() const { return lastRcPacket_; }
 
   /// @returns the timestamp (Core::NowNs()) the last RC_CHANNELS_PACKED
   /// frame was received.
