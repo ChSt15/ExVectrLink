@@ -32,8 +32,8 @@ constexpr int sx1280BRxEn = 3;
 constexpr int sx1280BTxEn = 2;
 // constexpr int sx1280BRxEn = 2;
 // constexpr int sx1280BTxEn = 3;
-constexpr int sx1280BPAdbm = 26;
-constexpr int sx1280BMaxPower = 27;
+constexpr int sx1280BPAdbm = sx1280APAdbm;
+constexpr int sx1280BMaxPower = sx1280AMaxPower;
 
 #define HAS_RADIO_B_HARDWARE
 

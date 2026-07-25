@@ -68,10 +68,38 @@ void noteCrsfTxFailure(int64_t nowNs) {
   }
 }
 
+// Max observed gap between successive successful RC_CHANNELS_PACKED writes
+// to the FC (failed writes don't count as output, so a burst of send-buffer
+// failures shows up here as one long gap). Free-running until reset via
+// resetCrsfMaxRcFrameGap() -- the handset's "RX Gap Reset" Lua command.
+uint32_t maxRcFrameGapUs = 0;
+int64_t lastRcFrameSentNs = 0;
+
+void noteRcFrameSent(int64_t nowNs) {
+  if (lastRcFrameSentNs != 0) {
+    const int64_t gapUs = (nowNs - lastRcFrameSentNs) / 1000;
+    if (gapUs > (int64_t)maxRcFrameGapUs) {
+      maxRcFrameGapUs =
+          gapUs > (int64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)gapUs;
+    }
+  }
+  lastRcFrameSentNs = nowNs;
+}
+
 } // namespace
 
 uint16_t getCrsfRcPacketRateHz() { return rcPacketRateHz; }
 uint16_t getCrsfTxFailureRateHz() { return crsfTxFailureRateHz; }
+
+uint32_t getCrsfMaxRcFrameGapUs() { return maxRcFrameGapUs; }
+
+void resetCrsfMaxRcFrameGap() {
+  maxRcFrameGapUs = 0;
+  // Also restart the measurement itself: without this, a reset issued while
+  // no RC frames are flowing (e.g. link down) would immediately record the
+  // entire outage as the new max the moment frames resume.
+  lastRcFrameSentNs = 0;
+}
 
 CRSFRcOutput::CRSFRcOutput(HardwareSerial &serial)
     : Core::Task_Periodic("CRSFRcOutput", Core::MILLISECONDS * 10),
@@ -278,6 +306,8 @@ void CRSFRcOutput::writeRcChannelsFrame() {
 
   if (!crsf_.write(pkt)) {
     noteCrsfTxFailure(Core::NowNs());
+  } else {
+    noteRcFrameSent(Core::NowNs());
   }
 }
 

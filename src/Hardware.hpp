@@ -13,6 +13,10 @@
 #include "targets/ExVectrLinkTxModule.hpp"
 #endif
 
+#if defined(TARGET_EXVECTRLINKTXMODULEDIVERSITY)
+#include "targets/ExVectrLinkTxModuleDiversity.hpp"
+#endif
+
 #if defined(TARGET_GENERICESP8285)
 #include "targets/GenericEsp8266.hpp"
 #endif

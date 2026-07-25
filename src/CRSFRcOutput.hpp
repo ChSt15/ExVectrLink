@@ -24,6 +24,15 @@ uint16_t getCrsfRcPacketRateHz();
 /// @returns how many CRSF frame writes failed (send buffer full) in the last
 /// completed 1-second window.
 uint16_t getCrsfTxFailureRateHz();
+/// @returns the maximum observed time between successive RC_CHANNELS_PACKED
+/// frames actually written to the CRSF port, in microseconds, since boot or
+/// the last resetCrsfMaxRcFrameGap(). 0 until at least two frames have gone
+/// out.
+uint32_t getCrsfMaxRcFrameGapUs();
+/// Resets the max-gap statistic above and restarts the measurement from the
+/// next frame sent (so an in-progress gap spanning the reset is discarded,
+/// not recorded).
+void resetCrsfMaxRcFrameGap();
 
 /**
  * @brief Sends CRSF RC_CHANNELS_PACKED frames to a flight controller, built

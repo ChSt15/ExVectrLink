@@ -59,6 +59,9 @@ enum class OtaSendKey : uint8_t {
   SyncOffsetTrigger, ///< CRSFRcInput: one-shot "set FHSS sync latency
                      ///< compensation" command relayed to the far end (see
                      ///< PacketTypes::SetSyncOffset).
+  ResetRcGapTrigger, ///< CRSFRcInput: one-shot "reset max CRSF RC-frame gap
+                     ///< statistic" command relayed to the far end (see
+                     ///< PacketTypes::ResetRcGapStat).
 };
 
 extern void
@@ -78,12 +81,21 @@ bool queueOtaPacket(OtaSendKey key, const VCTR::network::DataPacket &packet);
 /// Same as queueOtaPacket(), but a new (not-yet-queued) entry is inserted at
 /// the FRONT of the shared queue instead of the back, so `key` jumps ahead of
 /// any backlog of lower-priority keys already waiting. For senders whose data
-/// goes stale quickly and must not be held up behind that backlog -- e.g. the
-/// link statistics telemetry the dynamic-power loop depends on for both ends
-/// of the link.
+/// goes stale quickly and must not be held up behind that backlog.
 /// @return false only if `key` is new and the internal queue is full.
 bool queueOtaPacketFront(OtaSendKey key,
                          const VCTR::network::DataPacket &packet);
+
+/// Same as queueOtaPacketFront(), but a new entry is inserted at the SECOND
+/// position: whatever was already first in line still goes out next, then
+/// `key`, then the rest of the backlog (see OtaPacketQueue::
+/// updateQueueSecond()). Guarantees at most one other packet ever goes out
+/// ahead of `key` without starving the entry at the front -- used by the TX
+/// side's RC channels and the link statistics telemetry, so a burst of
+/// queued telemetry-relay packets can no longer delay them by several slots.
+/// @return false only if `key` is new and the internal queue is full.
+bool queueOtaPacketSecond(OtaSendKey key,
+                          const VCTR::network::DataPacket &packet);
 
 /// Returns the TX power (dBm) currently configured on this node.
 int8_t getLocalTxPowerdBm();
@@ -115,6 +127,14 @@ int16_t getRemoteIntervalOffsetNs();
 /// Far end's cumulative FHSS missed-slot (scheduling-latency) counter, from
 /// the OTA SlotStats packet.
 uint32_t getRemoteMissedSlots();
+/// Far end's max observed gap between successive CRSF RC-channel frames it
+/// wrote to its CRSF port (see getCrsfMaxRcFrameGapUs()), microseconds, from
+/// the OTA SlotStats packet.
+uint32_t getRemoteMaxRcGapUs();
+/// Zeros the locally-cached copy of getRemoteMaxRcGapUs(). Used by the Lua
+/// "RX Gap Reset" command so the menu shows the reset immediately instead of
+/// the stale value until the far end's next SlotStats report arrives.
+void resetRemoteMaxRcGapCache();
 
 /// Far end's current FHSS sync latency compensation, microseconds (0-2000,
 /// 50us resolution) -- see RemoteLinkStats::syncOffsetUs. 0 until a

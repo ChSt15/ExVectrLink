@@ -60,6 +60,35 @@ public:
     return entries_.placeFront(Entry{key, packet});
   }
 
+  /// Same as updateQueueFront(), except a new (not-yet-queued) entry is
+  /// inserted at the SECOND position instead of the very front: the entry
+  /// that was already first in line still goes out next, and `key` goes out
+  /// right after it, ahead of the rest of the backlog. For senders that must
+  /// never wait more than one packet behind other traffic (e.g. RC channels)
+  /// without perpetually starving whatever single entry keeps sitting at the
+  /// front. An entry that's already queued is still just overwritten in
+  /// place, same as the other update methods.
+  /// @return false only if `key` is new and the queue is already full.
+  bool updateQueueSecond(uint8_t key, const network::DataPacket &packet) {
+    for (size_t i = 0; i < entries_.size(); i++) {
+      if (entries_[i].key == key) {
+        entries_[i].packet = packet;
+        return true;
+      }
+    }
+    if (isFull()) {
+      return false;
+    }
+    Entry front;
+    if (!entries_.takeFront(front)) {
+      // Queue was empty: second position is the front.
+      return entries_.placeFront(Entry{key, packet});
+    }
+    entries_.placeFront(Entry{key, packet});
+    entries_.placeFront(front);
+    return true;
+  }
+
   /// Removes and returns the oldest queued entry.
   /// @return false if the queue was empty (`key`/`packet` left untouched).
   bool dequeue(uint8_t &key, network::DataPacket &packet) {

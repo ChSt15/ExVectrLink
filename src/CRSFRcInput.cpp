@@ -341,6 +341,10 @@ void CRSFRcInput::handleParameterRead(
     sendSyncOffsetInfoEntry(replyDest);
     return;
   }
+  if (req.parameterNumber == kRxRcGapParameterNumber) {
+    sendRxRcGapEntry(replyDest);
+    return;
+  }
 
   // COMMAND parameters (TX / RX upload mode). Reading a COMMAND resets it to
   // idle -- mirrors ExpressLRS's CRSFEndpoint::parameterUpdateReq() (READ of a
@@ -407,6 +411,15 @@ void CRSFRcInput::handleParameterRead(
     }
     sendCommandEntry(kSyncOffsetDecParameterNumber, "Sync Offset -100us",
                      syncOffsetDec_, replyDest);
+    return;
+  }
+  if (req.parameterNumber == kRxRcGapResetParameterNumber) {
+    if (req.chunkNumber == 0) {
+      rcGapReset_.step = VCTR::packets::crsf::CRSFCommandStep::Ready;
+      rcGapReset_.info[0] = '\0';
+    }
+    sendCommandEntry(kRxRcGapResetParameterNumber, "RX Gap Reset", rcGapReset_,
+                     replyDest);
     return;
   }
   // Any other parameter number: nothing to send -- see extern/CRSF details.md's
@@ -545,6 +558,16 @@ void CRSFRcInput::handleParameterWrite(
         "-100us...",
         [this]() { adjustRemoteSyncOffset(-(int16_t)kSyncOffsetStepUs); },
         req.commandStatus, replyDest);
+    return;
+  }
+  if (req.parameterNumber == kRxRcGapResetParameterNumber) {
+    // "RX Gap Reset": applied immediately, not through the delayed
+    // bench-test path -- there's nothing disruptive to get away from, the
+    // point is to start a fresh max-gap measurement right now.
+    handleUploadCommandWrite(
+        rcGapReset_, kRxRcGapResetParameterNumber, "RX Gap Reset",
+        "Resetting...", [this]() { triggerRxRcGapReset(); }, req.commandStatus,
+        replyDest);
     return;
   }
 }
@@ -707,6 +730,19 @@ void CRSFRcInput::sendSyncOffsetInfoEntry(uint8_t destAddress) {
   sendTelemetry(entry);
 }
 
+void CRSFRcInput::sendRxRcGapEntry(uint8_t destAddress) {
+  VCTR::packets::crsf::CRSFPacket_ParameterSettingsEntryInfo entry;
+  entry.destAddress = destAddress;
+  entry.parameterNumber = kRxRcGapParameterNumber;
+  strncpy(entry.name, "RX RC Gap", sizeof(entry.name) - 1);
+  // Reported in ms with 0.1 ms resolution -- nominal frame spacing is a few
+  // ms to tens of ms, so whole ms would hide most of the jitter of interest.
+  const uint32_t gapUs = ExVectrLink::datalink::getRemoteMaxRcGapUs();
+  snprintf(entry.info, sizeof(entry.info), "%u.%u ms",
+           (unsigned)(gapUs / 1000), (unsigned)((gapUs % 1000) / 100));
+  sendTelemetry(entry);
+}
+
 void CRSFRcInput::sendDynPowerEnableEntry(uint8_t destAddress) {
   const auto &dynPower = ExVectrLink::datalink::getDynamicPower();
 
@@ -796,6 +832,21 @@ void CRSFRcInput::triggerRxForceResync() {
       (uint8_t)ExVectrLink::datalink::PacketTypes::TestForceResync);
   ExVectrLink::datalink::queueOtaPacket(
       ExVectrLink::datalink::OtaSendKey::TestForceResyncTrigger, pkt);
+}
+
+void CRSFRcInput::triggerRxRcGapReset() {
+  // One-shot trigger -- see PacketTypes::ResetRcGapStat's handling in
+  // DatalinkCommandManager.cpp. Only ever carries this single message, so
+  // coalescing repeated clicks is harmless.
+  VCTR::network::DataPacket pkt;
+  pkt.payload.append(
+      (uint8_t)ExVectrLink::datalink::PacketTypes::ResetRcGapStat);
+  ExVectrLink::datalink::queueOtaPacket(
+      ExVectrLink::datalink::OtaSendKey::ResetRcGapTrigger, pkt);
+  // Zero the cached remote value too, so re-reading the "RX RC Gap" entry
+  // shows the reset immediately instead of the stale value until the RX's
+  // next 1 Hz SlotStats report.
+  ExVectrLink::datalink::resetRemoteMaxRcGapCache();
 }
 
 void CRSFRcInput::adjustRemoteSyncOffset(int16_t deltaUs) {
@@ -934,13 +985,17 @@ void CRSFRcInput::forwardRcChannels(
   // receive side (CRSFRcOutput) doesn't need to know or care whether the RC
   // data came from CRSF or a serial host app. Queued (not sent directly) so
   // it shares the single-slot channel with link stats/telemetry instead of
-  // racing to overwrite whichever of them is currently pending.
+  // racing to overwrite whichever of them is currently pending -- but queued
+  // into the SECOND position (see queueOtaPacketSecond()): a burst of queued
+  // telemetry/command packets could otherwise put several slots' worth of
+  // traffic ahead of the RC channels, stretching the RX's CRSF RC-frame
+  // output gap to ~50 ms. This bounds it to at most one other packet ahead.
   VCTR::network::DataPacket otaPkt;
   otaPkt.payload.setSize(packet.numBytes() + 1);
   packet.serialize(otaPkt.payload.getPtr());
   otaPkt.payload[packet.numBytes()] =
       (uint8_t)ExVectrLink::datalink::PacketTypes::Data;
-  ExVectrLink::datalink::queueOtaPacket(
+  ExVectrLink::datalink::queueOtaPacketSecond(
       ExVectrLink::datalink::OtaSendKey::RcChannels, otaPkt);
 }
 

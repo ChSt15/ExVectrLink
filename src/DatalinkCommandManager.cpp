@@ -32,6 +32,7 @@ uint16_t rxRuntimeMinutes = 0;
 int16_t rxFhssOffsetUs = 0;
 int16_t rxIntervalOffsetNs = 0;
 uint32_t rxMissedSlots = 0;
+uint32_t rxMaxRcGapUs = 0;
 // No longer carried in the RxState packet (dropped to make room for the debug
 // fields above -- the OTA frame only holds 8 data bytes). Kept so existing
 // consumers still compile; they now read a constant 0.
@@ -86,6 +87,10 @@ int16_t getRemoteIntervalOffsetNs() { return rxIntervalOffsetNs; }
 
 uint32_t getRemoteMissedSlots() { return rxMissedSlots; }
 
+uint32_t getRemoteMaxRcGapUs() { return rxMaxRcGapUs; }
+
+void resetRemoteMaxRcGapCache() { rxMaxRcGapUs = 0; }
+
 uint16_t getRemoteSyncOffsetUs() { return remoteStats.syncOffsetUs; }
 
 // ---------------------------------------------------------------------------
@@ -109,6 +114,11 @@ bool queueOtaPacket(OtaSendKey key, const VCTR::network::DataPacket &packet) {
 bool queueOtaPacketFront(OtaSendKey key,
                          const VCTR::network::DataPacket &packet) {
   return otaSendQueue.updateQueueFront((uint8_t)key, packet);
+}
+
+bool queueOtaPacketSecond(OtaSendKey key,
+                          const VCTR::network::DataPacket &packet) {
+  return otaSendQueue.updateQueueSecond((uint8_t)key, packet);
 }
 
 class OtaQueuePump : public VCTR::Core::Task_Periodic {
@@ -159,6 +169,14 @@ static uint16_t getLocalRcPacketRateHz() {
 static uint16_t getLocalCrsfTxFailureRateHz() {
 #if defined(ENABLE_CRSF)
   return VCTR::ExVectrLink::getCrsfTxFailureRateHz();
+#else
+  return 0;
+#endif
+}
+
+static uint32_t getLocalMaxRcFrameGapUs() {
+#if defined(ENABLE_CRSF)
+  return VCTR::ExVectrLink::getCrsfMaxRcFrameGapUs();
 #else
   return 0;
 #endif
@@ -293,23 +311,29 @@ static void decodeRxState(const uint8_t in[8], uint16_t &desyncCount,
 }
 
 // SlotStats OTA payload -- the far end's cumulative FHSS missed-slot counter
-// (scheduling latency, not RF loss). Only the first 4 bytes are used; the rest
-// are padded so the payload is the same 8-data + 1-type-byte length every
-// other OTA packet uses (the receive path reads the type from the last byte).
-static void encodeSlotStats(uint32_t missedSlots, uint8_t out[8]) {
+// (scheduling latency, not RF loss) in bytes 0-3, plus its max observed gap
+// between successive CRSF RC-channel frame writes (microseconds -- see
+// getCrsfMaxRcFrameGapUs()) in bytes 4-7, filling the same 8-data +
+// 1-type-byte length every other OTA packet uses (the receive path reads the
+// type from the last byte).
+static void encodeSlotStats(uint32_t missedSlots, uint32_t maxRcGapUs,
+                            uint8_t out[8]) {
   out[0] = (uint8_t)(missedSlots & 0xFF);
   out[1] = (uint8_t)((missedSlots >> 8) & 0xFF);
   out[2] = (uint8_t)((missedSlots >> 16) & 0xFF);
   out[3] = (uint8_t)((missedSlots >> 24) & 0xFF);
-  out[4] = 0;
-  out[5] = 0;
-  out[6] = 0;
-  out[7] = 0;
+  out[4] = (uint8_t)(maxRcGapUs & 0xFF);
+  out[5] = (uint8_t)((maxRcGapUs >> 8) & 0xFF);
+  out[6] = (uint8_t)((maxRcGapUs >> 16) & 0xFF);
+  out[7] = (uint8_t)((maxRcGapUs >> 24) & 0xFF);
 }
 
-static void decodeSlotStats(const uint8_t in[8], uint32_t &missedSlots) {
+static void decodeSlotStats(const uint8_t in[8], uint32_t &missedSlots,
+                            uint32_t &maxRcGapUs) {
   missedSlots = (uint32_t)in[0] | ((uint32_t)in[1] << 8) |
                 ((uint32_t)in[2] << 16) | ((uint32_t)in[3] << 24);
+  maxRcGapUs = (uint32_t)in[4] | ((uint32_t)in[5] << 8) |
+               ((uint32_t)in[6] << 16) | ((uint32_t)in[7] << 24);
 }
 
 static uint8_t getLocalTxAntennaIndex() {
@@ -351,11 +375,13 @@ class LinkInfoSender : public VCTR::Core::Task_Periodic {
   // LinkTelemetry carries the RSSI/SNR/LQ that the far end's dynamic-power
   // loop (see updateDynamicPowerFromRemoteLinkInfo()) depends on, so it's
   // timed independently of -- and sent at a fixed 2 Hz regardless of --
-  // RxState/SlotStats below, and queued via queueOtaPacketFront() so it
-  // jumps ahead of any backlog of lower-priority OTA traffic (CRSF sensor
-  // relay, ...) instead of going stale behind it. On top of this baseline,
-  // OtaQueuePump sends an extra LinkTelemetry whenever the OTA queue runs
-  // empty, so idle slots still carry fresh link stats.
+  // RxState/SlotStats below, and queued via queueOtaPacketSecond() so at
+  // most one packet of the backlog of lower-priority OTA traffic (CRSF
+  // sensor relay, ...) ever goes out ahead of it instead of it going stale
+  // behind all of it -- second rather than front so it can't itself starve
+  // the TX side's RC channels, which claim the same position. On top of
+  // this baseline, OtaQueuePump sends an extra LinkTelemetry whenever the
+  // OTA queue runs empty, so idle slots still carry fresh link stats.
   static constexpr int64_t kLinkTelemetryIntervalNs = 500 * Core::MILLISECONDS;
   static constexpr int64_t kRxStateIntervalNs = 1000 * Core::MILLISECONDS;
 
@@ -434,8 +460,8 @@ public:
     serialTelecomsPtr->sendSerialPacket(linkInfoPacket);
 
     // Also broadcast our link stats to the other end over-the-air.
-    queueOtaPacketFront(OtaSendKey::LinkTelemetry,
-                        buildLinkTelemetryOtaPacket());
+    queueOtaPacketSecond(OtaSendKey::LinkTelemetry,
+                         buildLinkTelemetryOtaPacket());
   }
 
   void sendRxStatePacket() {
@@ -458,7 +484,8 @@ public:
 
   void sendSlotStatsPacket() {
     uint8_t payload[8];
-    encodeSlotStats(getFhss().getMissedSlotCounter(), payload);
+    encodeSlotStats(getFhss().getMissedSlotCounter(),
+                    getLocalMaxRcFrameGapUs(), payload);
 
     network::DataPacket otaPkt;
     for (size_t i = 0; i < 8; i++) {
@@ -634,10 +661,13 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
       rxFhssOffsetUs = remFhssOffsetUs;
       rxIntervalOffsetNs = remIntervalOffsetNs;
     } else if (pktType == (uint8_t)PacketTypes::SlotStats) {
-      // Far end's FHSS missed-slot (scheduling-latency) counter.
+      // Far end's FHSS missed-slot (scheduling-latency) counter and its max
+      // CRSF RC-frame output gap.
       uint32_t remMissedSlots;
-      decodeSlotStats(packet.payload.getPtr(), remMissedSlots);
+      uint32_t remMaxRcGapUs;
+      decodeSlotStats(packet.payload.getPtr(), remMissedSlots, remMaxRcGapUs);
       rxMissedSlots = remMissedSlots;
+      rxMaxRcGapUs = remMaxRcGapUs;
     } else if (pktType == (uint8_t)PacketTypes::UploadMode) {
       // OTA upload mode packet -- forward to serial host.
       VCTR::WifiUpload::startWiFiUploadMode();
@@ -660,6 +690,12 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
         const uint16_t clampedUs = us > 2000 ? 2000 : us;
         getFhss().setSyncLatencyCompensation(clampedUs * Core::MICROSECONDS);
       }
+    } else if (pktType == (uint8_t)PacketTypes::ResetRcGapStat) {
+      // Reset the max CRSF RC-frame output gap statistic -- meant for the RX
+      // side; harmless no-op on a build without a CRSF output.
+#if defined(ENABLE_CRSF)
+      VCTR::ExVectrLink::resetCrsfMaxRcFrameGap();
+#endif
     }
     // Other types are silently ignored for now.
   });

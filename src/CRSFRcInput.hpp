@@ -193,6 +193,22 @@ private:
   void sendSyncOffsetInfoEntry(uint8_t destAddress);
   void adjustRemoteSyncOffset(int16_t deltaUs);
 
+  // ── RX RC-frame output gap monitoring (see getCrsfMaxRcFrameGapUs() /
+  // PacketTypes::ResetRcGapStat) ──
+  // "RX RC Gap" is a read-only INFO field showing the RX side's max observed
+  // time between successive RC-channel frames it wrote to its CRSF port,
+  // reported back inside its 1 Hz OTA SlotStats packet (getRemoteMaxRcGapUs()).
+  // "RX Gap Reset" relays a one-shot OTA trigger that zeros the statistic on
+  // the RX so a fresh measurement can start -- applied immediately (no
+  // bench-test-style delay), like the sync-offset buttons; it also zeros the
+  // local cache so the menu reads 0 right away rather than showing the stale
+  // value until the next SlotStats report.
+  static constexpr uint8_t kRxRcGapParameterNumber = 19;
+  static constexpr uint8_t kRxRcGapResetParameterNumber = 20;
+  UploadCommand rcGapReset_;
+  void sendRxRcGapEntry(uint8_t destAddress);
+  void triggerRxRcGapReset();
+
   // Read-only INFO parameter showing this TX module's own chip temperature.
   // Sampled fresh each time the field is actually read (menu opened/
   // reloaded) rather than on a timer -- the CRSF parameter protocol has no

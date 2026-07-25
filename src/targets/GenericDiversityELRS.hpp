@@ -24,8 +24,8 @@ constexpr int sx1280BNss = 27;
 constexpr int sx1280BRst = 26;
 constexpr int sx1280BRxEn = 10;
 constexpr int sx1280BTxEn = 14;
-constexpr int sx1280BPAdbm = 19;
-constexpr int sx1280BMaxPower = 20;
+constexpr int sx1280BPAdbm = sx1280APAdbm;
+constexpr int sx1280BMaxPower = sx1280AMaxPower;
 
 constexpr int ledRgb = 22;
 
