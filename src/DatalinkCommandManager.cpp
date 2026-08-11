@@ -11,6 +11,7 @@
 #include "DynamicPowerSetup.hpp"
 #include "FhssSetup.hpp"
 #include "OtaPacketQueue.hpp"
+#include "RFSetup.hpp"
 #include "WifiUpload.hpp"
 
 #if defined(ENABLE_CRSF)
@@ -351,13 +352,12 @@ static VCTR::network::DataPacket buildLinkTelemetryOtaPacket() {
   const auto &radio = getLinkStatsRadio();
 
   uint8_t payload[8] = {};
-  encodeLinkInfo(getLocalTxAntennaIndex(), getFhss().getLinkQuality(),
-                 getLocalTxPowerdBm(), radio.getPacketRSSI(),
-                 (float)radio.getPacketSNR(),
-                 getDynamicPower().isDynamicPowerEnabled(),
-                 (uint16_t)(getFhss().getSyncLatencyCompensation() /
-                            Core::MICROSECONDS),
-                 payload);
+  encodeLinkInfo(
+      getLocalTxAntennaIndex(), getFhss().getLinkQuality(),
+      getLocalTxPowerdBm(), radio.getPacketRSSI(), (float)radio.getPacketSNR(),
+      getDynamicPower().isDynamicPowerEnabled(),
+      (uint16_t)(getFhss().getSyncLatencyCompensation() / Core::MICROSECONDS),
+      payload);
 
   network::DataPacket otaPkt;
   for (size_t i = 0; i < 8; i++) {
@@ -468,7 +468,8 @@ public:
 
     const uint16_t runtimeMinutes = (uint16_t)((millis() / 60000UL) & 0xFFFF);
     const int16_t fhssOffsetUs = clampToI16(getFhss().getTimingOffset() / 1000);
-    const int16_t intervalOffsetNs = clampToI16(getFhss().getIntervalCorrection());
+    const int16_t intervalOffsetNs =
+        clampToI16(getFhss().getIntervalCorrection());
 
     uint8_t payload[8];
     encodeRxState((uint16_t)getFhss().getDesyncCounter(), runtimeMinutes,
@@ -484,8 +485,8 @@ public:
 
   void sendSlotStatsPacket() {
     uint8_t payload[8];
-    encodeSlotStats(getFhss().getMissedSlotCounter(),
-                    getLocalMaxRcFrameGapUs(), payload);
+    encodeSlotStats(getFhss().getMissedSlotCounter(), getLocalMaxRcFrameGapUs(),
+                    payload);
 
     network::DataPacket otaPkt;
     for (size_t i = 0; i < 8; i++) {
@@ -560,6 +561,9 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
         }
 
         applyLocalTxPowerToRadios();
+        // Persist the dynamic min/max and enable flag (the hardware limit is a
+        // board property and stays out of the store).
+        saveRfSettings();
       });
 
   serialTelecoms.addSerialPacketHandler<SerialPacket_SetLinkChannel>(
@@ -677,7 +681,7 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
       // real scheduling hiccup on this side -- e.g. testing whether the
       // in-flight-reception grace window and the missed-slot catch-up path
       // recover cleanly afterwards.
-      delay(500);
+      delay(1514);
     } else if (pktType == (uint8_t)PacketTypes::TestForceResync) {
       getFhss().triggerFullResyncTest();
     } else if (pktType == (uint8_t)PacketTypes::SetSyncOffset) {
@@ -685,8 +689,8 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
       // SetSyncOffset). Applied straight to this side's own FHSS -- meant
       // for the RX side; harmless (unused) if received on the TX side.
       if (packet.payload.size() >= 3) {
-        const uint16_t us = (uint16_t)packet.payload[0] |
-                            ((uint16_t)packet.payload[1] << 8);
+        const uint16_t us =
+            (uint16_t)packet.payload[0] | ((uint16_t)packet.payload[1] << 8);
         const uint16_t clampedUs = us > 2000 ? 2000 : us;
         getFhss().setSyncLatencyCompensation(clampedUs * Core::MICROSECONDS);
       }

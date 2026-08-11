@@ -13,6 +13,8 @@
 #include "ExVectrNetwork/DataPacket.hpp"
 #include "ExVectrPackets/crsf/CRSFTypes.hpp"
 #include "FhssSetup.hpp"
+#include "RFSetup.hpp"
+#include "Settings.hpp"
 #include "WifiUpload.hpp"
 
 namespace VCTR::ExVectrLink {
@@ -290,6 +292,9 @@ void CRSFRcInput::handleParameterPing(
   }
   VCTR::packets::crsf::CRSFPacket_ParameterDeviceInfo info;
   info.destAddress = replyDestForOrigin(ping.origAddress);
+  // The parameter list is this class's, so state its size here rather than
+  // relying on the packet's default staying in step with it.
+  info.parametersTotal = kParametersTotal;
   sendTelemetry(info);
 }
 
@@ -311,6 +316,10 @@ void CRSFRcInput::handleParameterRead(
   }
   if (req.parameterNumber == kDynMaxPowerParameterNumber) {
     sendDynMaxPowerEntry(replyDest);
+    return;
+  }
+  if (req.parameterNumber == kTxAntennaParameterNumber) {
+    sendTxAntennaEntry(replyDest);
     return;
   }
   if (req.parameterNumber == kRuntimeParameterNumber) {
@@ -453,6 +462,9 @@ void CRSFRcInput::handleParameterWrite(
     ExVectrLink::datalink::getDynamicPower().setEnableDynamicPower(
         req.commandStatus != 0);
     ExVectrLink::datalink::applyDynamicPowerToRadios();
+    // Keep the change across a power cycle -- the store batches this up and
+    // writes it out once the user stops changing things.
+    ExVectrLink::datalink::saveRfSettings();
     return;
   }
   if (req.parameterNumber == kDynMinPowerParameterNumber ||
@@ -473,6 +485,17 @@ void CRSFRcInput::handleParameterWrite(
     // away (DynamicPower::constrainPowerToLimits()); push the result to the
     // radio now rather than waiting for the next FHSS slot.
     ExVectrLink::datalink::applyDynamicPowerToRadios();
+    ExVectrLink::datalink::saveRfSettings();
+    return;
+  }
+  if (req.parameterNumber == kTxAntennaParameterNumber) {
+    // Option 0 is "Diversity"; the rest map straight onto antenna 0, 1, ...
+    // setTxAntenna() applies the choice to the radios and stores it.
+    const uint8_t antenna =
+        (req.commandStatus == 0)
+            ? RFSettings::kDiversityTxAntenna
+            : static_cast<uint8_t>(req.commandStatus - 1);
+    ExVectrLink::datalink::setTxAntenna(antenna);
     return;
   }
 
@@ -795,6 +818,43 @@ void CRSFRcInput::sendDynMaxPowerEntry(uint8_t destAddress) {
   entry.max = count > 0 ? count - 1 : 0;
   entry.value = allowedPowerIndexFor(hwMin, hwMax, dynPower.getDynMaxPower());
   entry.defaultValue = entry.max;
+
+  sendTelemetry(entry);
+}
+
+void CRSFRcInput::sendTxAntennaEntry(uint8_t destAddress) {
+  const uint8_t antennaCount = ExVectrLink::datalink::getTxAntennaCount();
+  const uint8_t selected = ExVectrLink::datalink::getTxAntenna();
+
+  VCTR::packets::crsf::CRSFPacket_ParameterSettingsEntryTextSelection entry;
+  entry.destAddress = destAddress;
+  entry.parameterNumber = kTxAntennaParameterNumber;
+  strncpy(entry.name, "TX Antenna", sizeof(entry.name) - 1);
+
+  // "Diversity" first, then one option per antenna, numbered from 1 the way
+  // they are labelled on the hardware.
+  int written = snprintf(entry.options, sizeof(entry.options), "Diversity");
+  size_t pos = (written > 0) ? (size_t)written : 0;
+  for (uint8_t i = 0; i < antennaCount; i++) {
+    if (pos + 1 >= sizeof(entry.options)) {
+      break; // Out of room -- better a short list than a mangled one.
+    }
+    written = snprintf(entry.options + pos, sizeof(entry.options) - pos,
+                       ";Ant %u", (unsigned)(i + 1));
+    if (written <= 0 || (size_t)written >= sizeof(entry.options) - pos) {
+      entry.options[pos] = '\0'; // Would have been truncated -- drop it.
+      break;
+    }
+    pos += (size_t)written;
+  }
+
+  entry.min = 0;
+  entry.max = antennaCount; // index 0 is Diversity, so N antennas -> max N
+  entry.value = (selected == RFSettings::kDiversityTxAntenna ||
+                 selected >= antennaCount)
+                    ? 0
+                    : (uint8_t)(selected + 1);
+  entry.defaultValue = 0; // Diversity
 
   sendTelemetry(entry);
 }

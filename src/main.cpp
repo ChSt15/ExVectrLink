@@ -21,6 +21,8 @@
 #include "DatalinkSetup.hpp"
 #include "DynamicPowerSetup.hpp"
 #include "FhssSetup.hpp"
+#include "RFSetup.hpp"
+#include "Settings.hpp"
 
 #include "sbus.h"
 
@@ -295,6 +297,13 @@ SyncFailsafeMonitor syncFailsafeMonitor;
 // (plain/test builds, and CRSF_INPUT builds -- CRSFRcInput talks over
 // linkSerialPort, leaving `Serial` free).
 #if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF)
+// Defined further down with the DIO1 ISRs; declared here so DebugMonitor can
+// report the per-radio interrupt rate.
+extern volatile uint32_t dio1CountA;
+#if defined(HAS_DIVERSITY)
+extern volatile uint32_t dio1CountB;
+#endif
+
 /**
  * @brief Prints radio link stats (and, if CRSFRcInput is enabled, the
  * current RC channels + reception rate) to the USB Serial port once per
@@ -307,6 +316,10 @@ class DebugMonitor : public Core::Task_Periodic {
 private:
   uint32_t lastRxPacketCount_ = 0;
   uint32_t lastTxPacketCount_ = 0;
+  uint32_t lastDio1CountA_ = 0;
+#if defined(HAS_DIVERSITY)
+  uint32_t lastDio1CountB_ = 0;
+#endif
 #if defined(ENABLE_CRSF_INPUT)
   uint32_t lastRcFrameCount_ = 0;
 #endif
@@ -350,6 +363,27 @@ public:
                   "TXpwr:%3d dBm%s\n",
                   remote.linkQuality, remote.rssi, remote.snr,
                   remote.txPowerdBm, remote.valid ? "" : " (no data yet)");
+    // DIO1 edge rate per radio, alongside the FHSS sync offset it feeds.
+    // A radio carrying packets at 0 edges/s is running on poll-time
+    // timestamps, which shows up here as a sync offset wandering by tens to
+    // hundreds of microseconds instead of staying inside ~+/-10 us.
+    const uint32_t dio1A = dio1CountA;
+    const uint32_t dio1RateA = dio1A - lastDio1CountA_;
+    lastDio1CountA_ = dio1A;
+#if defined(HAS_DIVERSITY)
+    const uint32_t dio1B = dio1CountB;
+    const uint32_t dio1RateB = dio1B - lastDio1CountB_;
+    lastDio1CountB_ = dio1B;
+    Serial.printf("             DIO1 edges: A %lu /s B %lu /s | sync offset "
+                  "%7.1f us\n",
+                  (unsigned long)dio1RateA, (unsigned long)dio1RateB,
+                  (double)fhss.getTimingOffset() / (double)Core::MICROSECONDS);
+#else
+    Serial.printf("             DIO1 edges: A %lu /s | sync offset %7.1f us\n",
+                  (unsigned long)dio1RateA,
+                  (double)fhss.getTimingOffset() / (double)Core::MICROSECONDS);
+#endif
+
     // Remote (RX-side) CRSF -> flight controller health.
     //  RC rate  >0  => RX is decoding RC and building CRSF frames.
     //  fail rate 0  => those frames are being written to the FC UART OK
@@ -477,20 +511,29 @@ ErrorSender errorSender;
 // ISR-captured state for DIO1 interrupt timestamps
 volatile uint32_t dio1MicrosA = 0;
 volatile bool dio1FiredA = false;
+// Free-running edge counters, reported by DebugMonitor. A radio whose DIO1
+// rate sits at 0 while it is demonstrably moving packets has a dead interrupt
+// line (wrong/unavailable pin), which is not fatal -- fetchIrqFlags() falls
+// back to a poll-time Core::NowNs() -- but stamps every RX_DONE late by the
+// main-loop latency and so jitters the FHSS sync offset badly.
+volatile uint32_t dio1CountA = 0;
 #if defined(HAS_DIVERSITY)
 volatile uint32_t dio1MicrosB = 0;
 volatile bool dio1FiredB = false;
+volatile uint32_t dio1CountB = 0;
 #endif
 
 void IRAM_ATTR onRadioADio1() {
   dio1MicrosA = micros();
   dio1FiredA = true;
+  dio1CountA++;
 }
 
 #if defined(HAS_DIVERSITY)
 void IRAM_ATTR onRadioBDio1() {
   dio1MicrosB = micros();
   dio1FiredB = true;
+  dio1CountB++;
 }
 #endif
 
@@ -584,10 +627,14 @@ void setup() {
                   onRadioBDio1, RISING);
 #endif
 
-#if !defined(TARGET_EXVECTRCONTROLLER) && !defined(TARGET_EXVECTRLINKTXMODULE)
-  VCTR::ExVectrLink::datalink::getFhss().setIsRxSide(true);
-#else
+  // Keyed off IS_TX_SIDE (Hardware.hpp) rather than re-listing targets here --
+  // a new handset-side target that is missing from such a list silently comes
+  // up as a receiver: it never transmits, and it keys its sync word/CRC with
+  // the wrong side bit, so the link never forms at all.
+#if defined(IS_TX_SIDE)
   VCTR::ExVectrLink::datalink::getFhss().setIsRxSide(false);
+#else
+  VCTR::ExVectrLink::datalink::getFhss().setIsRxSide(true);
 #endif
 
   // Unlike ENABLE_SBUS/ENABLE_CRSF (which hijack the USB `Serial` port for
@@ -636,8 +683,13 @@ void setup() {
   ExVectrLink::datalink::getDynamicPower().setMaxPower(
       HardwareConfig::sx1280AMaxPower);
   ExVectrLink::datalink::getDynamicPower().setMinPower(10);
-  ExVectrLink::datalink::getDynamicPower().setDynMaxPower(20);
-  ExVectrLink::datalink::getDynamicPower().setPower(20);
+  // The hardware limits above are fixed by the board; the transmit power and
+  // TX antenna come from EEPROM (falling back to the built-in defaults on a
+  // device that has never had them saved, and to a fixed power on the RX side
+  // -- see applyRfSettings()). Must run after the hardware limits, which clamp
+  // whatever is loaded.
+  ExVectrLink::setupSettings();
+  ExVectrLink::datalink::applyRfSettings();
   ExVectrLink::datalink::setupDynamicPower();
 
 #if defined(ENABLE_SBUS) || defined(ENABLE_CRSF) || defined(ENABLE_CRSF_INPUT)

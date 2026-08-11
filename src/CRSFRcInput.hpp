@@ -232,6 +232,22 @@ private:
   void sendDynMinPowerEntry(uint8_t destAddress);
   void sendDynMaxPowerEntry(uint8_t destAddress);
 
+  // TEXT_SELECTION control for which antenna this module transmits on.
+  // "Diversity" (the default) leaves the per-slot choice to Sx1280Diversity,
+  // which follows whichever antenna is receiving the far end best; the
+  // remaining options pin every transmission to one antenna. The option list
+  // is built from the radios this build actually has (see
+  // datalink::getTxAntennaCount()), so a single-radio build offers only
+  // "Diversity" and "Ant 1".
+  static constexpr uint8_t kTxAntennaParameterNumber = 21;
+  void sendTxAntennaEntry(uint8_t destAddress);
+
+  // Highest parameter number this module answers for. The handset only ever
+  // requests parameters 1..parametersTotal, so a newly added entry stays
+  // invisible in the Lua menu until this is bumped -- see the deviceInfo reply
+  // in handleParameterPing().
+  static constexpr uint8_t kParametersTotal = 21;
+
   // Read-only INFO parameters showing the far-end (RX-side) debug diagnostics
   // decoded from its OTA RxState packet (see DatalinkCommandManager's
   // getRemote*() accessors). Like the temperature entry, each is sampled

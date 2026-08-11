@@ -31,6 +31,7 @@ constexpr int sx1280BTxEn = 18;
 constexpr int sx1280BPAdbm = sx1280APAdbm;
 constexpr int sx1280BMaxPower = sx1280AMaxPower;
 
+#define HAS_DIVERSITY
 #define HAS_RADIO_B_HARDWARE
 
 // constexpr int ledRgb = -1; // Not used, set to -1
@@ -46,8 +47,9 @@ constexpr int sx1280BMaxPower = sx1280AMaxPower;
 // CRSF::switchToRx()/switchToTx()), so it only drives the bus while
 // actually transmitting telemetry and otherwise stays high-impedance so it
 // does not fight the handset's driver.
-constexpr int serialRx = 12;
-constexpr int serialTx = 12;
+constexpr int sport = 16;
+constexpr int serialRx = sport;
+constexpr int serialTx = sport;
 
 } // namespace VCTR::HardwareConfig
 
