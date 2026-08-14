@@ -232,15 +232,28 @@ private:
   void sendDynMinPowerEntry(uint8_t destAddress);
   void sendDynMaxPowerEntry(uint8_t destAddress);
 
-  // TEXT_SELECTION control for which antenna this module transmits on.
-  // "Diversity" (the default) leaves the per-slot choice to Sx1280Diversity,
-  // which follows whichever antenna is receiving the far end best; the
-  // remaining options pin every transmission to one antenna. The option list
-  // is built from the radios this build actually has (see
-  // datalink::getTxAntennaCount()), so a single-radio build offers only
-  // "Diversity" and "Ant 1".
+  // TEXT_SELECTION control for which antenna this module transmits on, one
+  // entry per Sx1280Diversity::TxAntennaMode plus one per antenna:
+  //   "Best SNR" (the default) -- per-slot choice by Sx1280Diversity, which
+  //               follows whichever antenna is receiving the far end best.
+  //   "Cycle"    -- one antenna per transmitted packet, wrapping
+  //               (TxAntennaMode::RoundRobin), so no single antenna's fade
+  //               can take out a run of consecutive packets.
+  //   "Ant N"    -- every transmission pinned to that one antenna.
+  // The per-antenna options are built from the radios this build actually has
+  // (see datalink::getTxAntennaCount()), so a single-radio build offers
+  // "Best SNR", "Cycle" and "Ant 1" (the first two being equivalent there).
   static constexpr uint8_t kTxAntennaParameterNumber = 21;
+  // Option indices in the list sendTxAntennaEntry() builds. The fixed
+  // antennas follow the two mode options, so option kTxAntennaOptionFirstFixed
+  // is antenna 0.
+  static constexpr uint8_t kTxAntennaOptionBestSnr = 0;
+  static constexpr uint8_t kTxAntennaOptionCycle = 1;
+  static constexpr uint8_t kTxAntennaOptionFirstFixed = 2;
   void sendTxAntennaEntry(uint8_t destAddress);
+  /// Maps an option index from the list above back to the stored txAntenna
+  /// value it means (see RFSettings::txAntenna).
+  static uint8_t txAntennaForOption(uint8_t option);
 
   // Highest parameter number this module answers for. The handset only ever
   // requests parameters 1..parametersTotal, so a newly added entry stays

@@ -25,16 +25,18 @@ void saveRfSettings();
 
 /**
  * @brief Antenna transmissions go out on: 0 is the first radio, 1 the next,
- * and so on; RFSettings::kDiversityTxAntenna leaves the choice to diversity.
+ * and so on; RFSettings::kBestSnrTxAntenna means whichever is receiving best,
+ * RFSettings::kRoundRobinTxAntenna means cycling one antenna per packet.
  */
 uint8_t getTxAntenna();
 
 /**
- * @brief Pins transmissions to one antenna, or hands the choice back to
- * diversity with RFSettings::kDiversityTxAntenna. Applies immediately and
- * stores the change.
- * @return true if the antenna exists (or diversity was selected); false leaves
- * everything as it was.
+ * @brief Pins transmissions to one antenna, or selects one of the two
+ * algorithmic choices (RFSettings::kBestSnrTxAntenna /
+ * RFSettings::kRoundRobinTxAntenna). Applies immediately and stores the
+ * change.
+ * @return true if the antenna exists (or an algorithmic mode was selected);
+ * false leaves everything as it was.
  */
 bool setTxAntenna(uint8_t antenna);
 

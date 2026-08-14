@@ -38,7 +38,10 @@ struct RFSettings {
 
   /// @brief txAntenna value that leaves the choice to the diversity algorithm,
   /// i.e. whichever antenna is currently receiving best.
-  static constexpr uint8_t kDiversityTxAntenna = UINT8_MAX;
+  static constexpr uint8_t kBestSnrTxAntenna = UINT8_MAX;
+  /// @brief txAntenna value that cycles through the antennas, one per
+  /// transmitted packet. See Sx1280Diversity::TxAntennaMode::RoundRobin.
+  static constexpr uint8_t kRoundRobinTxAntenna = UINT8_MAX - 1;
 
   /// @brief Whether the dynamic power algorithm runs at all. See
   /// datalink::DynamicPower::setEnableDynamicPower().
@@ -49,10 +52,11 @@ struct RFSettings {
   /// fixed operating power while dynamic power is disabled.
   uint8_t dynMaxPowerDbm = 20;
   /// @brief Antenna to transmit on: 0 is the first radio, 1 the next, and so
-  /// on; kDiversityTxAntenna (the default) lets diversity pick per slot. An
-  /// index no radio exists for falls back to diversity too -- see
+  /// on; kBestSnrTxAntenna (the default) picks the best-receiving one per
+  /// slot, kRoundRobinTxAntenna cycles through them a packet at a time. An
+  /// index no radio exists for falls back to best-SNR -- see
   /// datalink::applyRfSettings().
-  uint8_t txAntenna = kDiversityTxAntenna;
+  uint8_t txAntenna = kBestSnrTxAntenna;
 };
 static_assert(sizeof(RFSettings) == 4,
               "RFSettings changed size -- give it a new kStorageKey so the "

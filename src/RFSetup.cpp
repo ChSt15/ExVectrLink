@@ -18,11 +18,24 @@ namespace {
 constexpr uint8_t kRxFixedPowerDbm = 20;
 #endif
 
-/// @brief The diversity link index a stored antenna setting means.
-size_t txLinkIndexFor(uint8_t antenna) {
-  return (antenna == RFSettings::kDiversityTxAntenna)
-             ? Sx1280Diversity::kAutoTxLink
-             : static_cast<size_t>(antenna);
+/// @brief Points the radios at whatever a stored txAntenna value means: one of
+/// the two algorithmic modes, or a fixed antenna index.
+/// @return false if `antenna` names an antenna this build has no radio for,
+/// in which case nothing is changed.
+bool applyTxAntenna(uint8_t antenna) {
+  auto &diversity = getSx1280Diversity();
+
+  if (antenna == RFSettings::kBestSnrTxAntenna) {
+    diversity.setTxAntennaMode(Sx1280Diversity::TxAntennaMode::BestSnr);
+    return true;
+  }
+  if (antenna == RFSettings::kRoundRobinTxAntenna) {
+    diversity.setTxAntennaMode(Sx1280Diversity::TxAntennaMode::RoundRobin);
+    return true;
+  }
+  // setDesignatedTxLinkIndex() switches to Fixed itself, and refuses an index
+  // with no radio behind it.
+  return diversity.setDesignatedTxLinkIndex(static_cast<size_t>(antenna));
 }
 
 } // namespace
@@ -37,15 +50,28 @@ uint8_t getTxAntennaCount() {
 }
 
 uint8_t getTxAntenna() {
-  const size_t designated = getSx1280Diversity().getDesignatedTxLinkIndex();
-  if (designated == Sx1280Diversity::kAutoTxLink) {
-    return RFSettings::kDiversityTxAntenna;
+  const auto &diversity = getSx1280Diversity();
+
+  switch (diversity.getTxAntennaMode()) {
+  case Sx1280Diversity::TxAntennaMode::RoundRobin:
+    return RFSettings::kRoundRobinTxAntenna;
+
+  case Sx1280Diversity::TxAntennaMode::Fixed: {
+    const size_t designated = diversity.getDesignatedTxLinkIndex();
+    if (designated == Sx1280Diversity::kAutoTxLink) {
+      return RFSettings::kBestSnrTxAntenna; // Fixed but nothing designated.
+    }
+    return static_cast<uint8_t>(designated);
   }
-  return static_cast<uint8_t>(designated);
+
+  case Sx1280Diversity::TxAntennaMode::BestSnr:
+  default:
+    return RFSettings::kBestSnrTxAntenna;
+  }
 }
 
 bool setTxAntenna(uint8_t antenna) {
-  if (!getSx1280Diversity().setDesignatedTxLinkIndex(txLinkIndexFor(antenna))) {
+  if (!applyTxAntenna(antenna)) {
     return false; // No such antenna -- leave the radios and the store alone.
   }
 
@@ -80,11 +106,10 @@ void applyRfSettings() {
 
   // An antenna index this build has no radio for (settings written by a
   // diversity build, running on a single-radio one) is refused by
-  // setDesignatedTxLinkIndex() -- fall back to letting diversity choose rather
-  // than leaving the radios pinned to whatever was set before.
-  auto &diversity = getSx1280Diversity();
-  if (!diversity.setDesignatedTxLinkIndex(txLinkIndexFor(rf.txAntenna))) {
-    diversity.setDesignatedTxLinkIndex(Sx1280Diversity::kAutoTxLink);
+  // applyTxAntenna() -- fall back to best-SNR rather than leaving the radios
+  // pinned to whatever was set before.
+  if (!applyTxAntenna(rf.txAntenna)) {
+    applyTxAntenna(RFSettings::kBestSnrTxAntenna);
   }
 
   applyDynamicPowerToRadios();

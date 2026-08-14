@@ -489,13 +489,11 @@ void CRSFRcInput::handleParameterWrite(
     return;
   }
   if (req.parameterNumber == kTxAntennaParameterNumber) {
-    // Option 0 is "Diversity"; the rest map straight onto antenna 0, 1, ...
-    // setTxAntenna() applies the choice to the radios and stores it.
-    const uint8_t antenna =
-        (req.commandStatus == 0)
-            ? RFSettings::kDiversityTxAntenna
-            : static_cast<uint8_t>(req.commandStatus - 1);
-    ExVectrLink::datalink::setTxAntenna(antenna);
+    // The option index maps back to a stored txAntenna value the same way
+    // sendTxAntennaEntry() built the list. setTxAntenna() applies the choice
+    // to the radios and stores it.
+    ExVectrLink::datalink::setTxAntenna(
+        txAntennaForOption(req.commandStatus));
     return;
   }
 
@@ -831,9 +829,11 @@ void CRSFRcInput::sendTxAntennaEntry(uint8_t destAddress) {
   entry.parameterNumber = kTxAntennaParameterNumber;
   strncpy(entry.name, "TX Antenna", sizeof(entry.name) - 1);
 
-  // "Diversity" first, then one option per antenna, numbered from 1 the way
-  // they are labelled on the hardware.
-  int written = snprintf(entry.options, sizeof(entry.options), "Diversity");
+  // The two algorithmic modes first, then one option per antenna, numbered
+  // from 1 the way they are labelled on the hardware -- see
+  // txAntennaForOption() for the index mapping.
+  int written =
+      snprintf(entry.options, sizeof(entry.options), "Best SNR;Cycle");
   size_t pos = (written > 0) ? (size_t)written : 0;
   for (uint8_t i = 0; i < antennaCount; i++) {
     if (pos + 1 >= sizeof(entry.options)) {
@@ -849,14 +849,29 @@ void CRSFRcInput::sendTxAntennaEntry(uint8_t destAddress) {
   }
 
   entry.min = 0;
-  entry.max = antennaCount; // index 0 is Diversity, so N antennas -> max N
-  entry.value = (selected == RFSettings::kDiversityTxAntenna ||
-                 selected >= antennaCount)
-                    ? 0
-                    : (uint8_t)(selected + 1);
-  entry.defaultValue = 0; // Diversity
+  // Two mode options ahead of the antennas, so N antennas -> last index N + 1.
+  entry.max = (uint8_t)(antennaCount + 1);
+  if (selected == RFSettings::kRoundRobinTxAntenna) {
+    entry.value = kTxAntennaOptionCycle;
+  } else if (selected == RFSettings::kBestSnrTxAntenna ||
+             selected >= antennaCount) {
+    entry.value = kTxAntennaOptionBestSnr;
+  } else {
+    entry.value = (uint8_t)(selected + kTxAntennaOptionFirstFixed);
+  }
+  entry.defaultValue = kTxAntennaOptionBestSnr;
 
   sendTelemetry(entry);
+}
+
+uint8_t CRSFRcInput::txAntennaForOption(uint8_t option) {
+  if (option == kTxAntennaOptionBestSnr) {
+    return RFSettings::kBestSnrTxAntenna;
+  }
+  if (option == kTxAntennaOptionCycle) {
+    return RFSettings::kRoundRobinTxAntenna;
+  }
+  return (uint8_t)(option - kTxAntennaOptionFirstFixed);
 }
 
 void CRSFRcInput::triggerRxWifiUpload() {
