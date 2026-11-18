@@ -33,10 +33,7 @@ Set once in `setup()` for each radio (`src/main.cpp:664-674`):
 | 2 | Medium | 7 | 800 kHz | 4/8 | 1/150 s | balanced |
 | 3 | LongRange | 8 | 800 kHz | 4/8 | 1/50 s | long range |
 
-The only consumer is the serial `SetModulationPreset` handler (`src/DatalinkCommandManager.cpp:528-540`). It changes SF/BW/CR on the local radios only:
-- `hopInterval` is never used, and the FHSS slot timing is not changed.
-- The far end is not told.
-- The index is not range-checked.
+Nothing in `src/` uses the table now: its only consumer, the serial `SetModulationPreset` handler, was removed with the serial protocol. `hopInterval` was never used, and the FHSS slot timing is not changed by any preset.
 
 So the link always runs SF7/BW800/CR4/8. Those are the radio parameters of "Medium", but at 100 slots/s rather than 150. Making presets real is roadmap item "link rate".
 
@@ -47,7 +44,7 @@ So the link always runs SF7/BW800/CR4/8. Those are the radio parameters of "Medi
 | Slot interval | 10 ms | `FHSS.hpp:208` | No setter is called. |
 | Slots per hop | 4 (40 ms per channel) | `FHSS.hpp:210` | No. The setter caps at 16, but the trailer only carries 2 bits. |
 | Role-reversal period `numTxPacketsToRx` | 15 slots | `FHSS.hpp:217` | No. `setRxSlotIndex()` would cap it at 4 (`FHSS.cpp:54-61`). |
-| Hop key | 0 | `FHSS.hpp:226` | Only by the serial `StartFHSS` packet, not persisted (`src/DatalinkCommandManager.cpp:575-579`) |
+| Hop key | 0 | `FHSS.hpp:226` | No. The serial `StartFHSS` packet that used to set it was removed. |
 | Sync latency compensation | 900 µs | `FHSS.hpp:213` | Lua "Sync Offset ±100us" → OTA `SetSyncOffset`, not persisted |
 
 - **Slots.** Each slot is one TX or one RX operation. `roleReverseCounter` counts 0…14.
@@ -103,9 +100,9 @@ The radio carries 11 bytes of FHSS payload:
 
 The **last application byte** of every frame is a `PacketTypes` value (`lib/ExVectrLink/include/ExVectrLink/datalink/PacketTypes.hpp:10-35`). Everything before it is that type's payload, up to 8 bytes.
 
-| Value | Type | Payload | Sent by | Effect on receipt (`src/DatalinkCommandManager.cpp:596-705`) |
+| Value | Type | Payload | Sent by | Effect on receipt (`src/DatalinkCommandManager.cpp`, receive handler) |
 |---|---|---|---|---|
-| 0 | `Data` | ≤ 8 bytes | TX: RC channels. RX: CRSF telemetry relay. Both: serial `PacketData` from a host. | Forwarded to the serial host as `PacketData` (type byte stripped). `CRSFRcOutput` and `CRSFRcInput` decode ExVectrPackets out of it. |
+| 0 | `Data` | ≤ 8 bytes | TX: RC channels. RX: CRSF telemetry relay. | Ignored by the command manager (it used to forward them to the serial host). `CRSFRcOutput` and `CRSFRcInput` decode ExVectrPackets out of it. |
 | 1 | `Heartbeat` | none | nobody | ignored |
 | 2 | `LinkTelemetry` | 8 bytes (5 used) | both, 2 Hz plus filler | updates `remoteStats` and drives the far end's dynamic power |
 | 3 | `RxState` | 8 bytes | both (despite the name), 1 Hz | desync count, runtime, FHSS offset, interval correction (shown in the Lua menu) |
@@ -116,7 +113,7 @@ The **last application byte** of every frame is a `PacketTypes` value (`lib/ExVe
 | 8 | `SetSyncOffset` | 2 bytes LE, µs | TX: Lua "Sync Offset ±100us" | sets sync latency compensation, clamped to 0–2000 µs |
 | 9 | `ResetRcGapStat` | none | TX: Lua "RX Gap Reset" | resets the CRSF RC-gap statistic |
 
-**About the parity bit:** `PacketTypes.hpp:37-88` defines an odd-parity encoding, with the type in bits 6..0 and parity in bit 7, via `encodePacketType()` / `packetTypeIsValid()`. **The firmware in `src/` does not use it.** It writes and compares the raw enum value (for example `src/DatalinkCommandManager.cpp:523`, `src/CRSFRcInput.cpp:1057`). Only the host-side `LinkManager` uses the parity encoding, as an extra byte *inside* `Data` payloads (see serial-protocol.md). The header comment ("everything … must go through encodePacketType()") does not describe current behaviour. See known-issues.md.
+**About the parity bit:** `PacketTypes.hpp:37-88` defines an odd-parity encoding, with the type in bits 6..0 and parity in bit 7, via `encodePacketType()` / `packetTypeIsValid()`. **The firmware in `src/` does not use it.** It writes and compares the raw enum value (for example `src/DatalinkCommandManager.cpp:523`, `src/CRSFRcInput.cpp:1057`). The host-side `LinkManager` that used it inside `Data` payloads was removed. The header comment ("everything … must go through encodePacketType()") does not describe current behaviour. See known-issues.md.
 
 ### OTA send queue
 
@@ -124,8 +121,6 @@ Every state-like sender queues through `OtaPacketQueue<8>` (`src/OtaPacketQueue.
 - A key that is already queued has its packet replaced in place, so stale duplicates never pile up.
 - New keys go to the back (`queueOtaPacket`), the front (`queueOtaPacketFront`) or second place (`queueOtaPacketSecond`, used by RC channels and link telemetry).
 - `OtaQueuePump` (2 ms) hands the next entry to FHSS whenever the TX slot is free. When the queue is empty it sends a fresh `LinkTelemetry` (`src/DatalinkCommandManager.cpp:139-157`).
-
-Exception: serial `PacketData` from a host calls `getFhss().transmitDataframe()` directly. It bypasses the queue and can overwrite, or be overwritten by, the pending frame (`src/DatalinkCommandManager.cpp:517-526`). See known-issues.md.
 
 **Downlink budget:** the RX side has about 6.7 TX slots/s. Of those, link telemetry takes 2/s, RxState 1/s and SlotStats 1/s. Battery, GPS stats and GPS position share the rest. Every idle slot is filled with link telemetry.
 
@@ -213,8 +208,7 @@ Diversity is used on targets with `HAS_DIVERSITY`: the diversity TX module and t
 
 **There is no bind procedure.**
 - All units use hop key 0 by default, so they share one hop sequence and one trailer-checksum seed. Any TX links with any RX of the same `OTA_VERSION`.
-- The key can only be changed by a serial host (`StartFHSS`), and it is not persisted.
-- `LinkManager::startBinding()` is a stub.
+- Nothing changes the key at runtime now (the serial `StartFHSS` packet was removed), and it is not persisted.
 - The legacy `CRSFOutput` mapped the Betaflight bind command to WiFi upload mode. That isn't ported to `CRSFRcOutput`.
 
 ## WiFi / OTA upload mode (`src/WifiUpload.cpp`)
@@ -228,9 +222,7 @@ How it is entered:
 | Boot button held at power-up | yes (link never starts) | `src/main.cpp:589-594` |
 | 5× `r` on `Serial` in the first second | yes (link never starts) | `src/main.cpp:601-615` |
 | Button held 3 s while running | **no**, WiFi runs next to the link | `src/WifiUpload.cpp:177-185` |
-| Plain-serial builds: no valid serial packet from the host (500 ms timeout) at any time after 10 s uptime | **no**, WiFi runs next to the link | `src/WifiUpload.cpp:188-193` |
 | `ENABLE_FORCEWIFI` | no | `src/WifiUpload.cpp:155-157` |
-| Serial `UpdateMode` packet | no (only unpauses WiFi) | `src/WifiUpload.cpp:149-153` |
 | OTA `UploadMode`, `Telecommand_UpdateMode`, Lua "TX Upload Mode", sync failsafe | **yes**: `startWiFiUploadMode()` removes every scheduler task except WiFi | `src/WifiUpload.cpp:199-210` |
 
 The only exit is a reset.

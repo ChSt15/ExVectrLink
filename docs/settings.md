@@ -8,18 +8,17 @@ Last verified against commit: 4830874 (submodule ExVectrData 283596f)
 
 | Record | Key | Field | Default | Changed by | Applied |
 |---|---|---|---|---|---|
-| `RFSettings` (`src/Settings.hpp:28-59`) | `0x0102` | `dynamicPowerEnabled` | true | Lua "Dyn Power", serial `SetPowerParams` | TX side only (`src/RFSetup.cpp:61-71`) |
-| | | `dynMinPowerDbm` | 10 | Lua "Dyn Min Pwr", serial | TX side only |
-| | | `dynMaxPowerDbm` | 20 | Lua "Dyn Max Pwr", serial | TX side only. Also the fixed power when dynamic power is off. |
+| `RFSettings` (`src/Settings.hpp:28-59`) | `0x0102` | `dynamicPowerEnabled` | true | Lua "Dyn Power" | TX side only (`src/RFSetup.cpp:61-71`) |
+| | | `dynMinPowerDbm` | 10 | Lua "Dyn Min Pwr" | TX side only |
+| | | `dynMaxPowerDbm` | 20 | Lua "Dyn Max Pwr" | TX side only. Also the fixed power when dynamic power is off. |
 | | | `txAntenna` | 255 = diversity | Lua "TX Antenna" | both sides. An index the build has no radio for falls back to diversity (`src/RFSetup.cpp:81-88`). |
 
 On the RX side the power fields are stored but ignored: the receiver always runs at a fixed 20 dBm (`src/RFSetup.cpp:72-79`).
 
 **Not persisted**, so these reset at every boot:
-- FHSS hop key (always 0 unless a serial host sets it)
+- FHSS hop key (always 0; nothing sets it now)
 - sync latency compensation (900 µs)
-- modulation preset
-- serial baud rate
+- modulation preset (not used by `src/` any more)
 
 The planned link-mode settings (roadmap.md) would be the second record.
 

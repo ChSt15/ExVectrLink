@@ -46,22 +46,24 @@ Selectable in the handset Lua menu, stored in EEPROM, applied to **both** ends o
 - **Dual band:** `Sx1280Diversity` (`lib/ExVectrLink/src/datalink/Sx1280Diversity.cpp`) today puts both radios on the same channel and picks one. Dual band would drive the radios independently, as two FHSS/link instances, or as a new combiner with two TX slots. It needs `HAS_DIVERSITY` hardware at both ends: the diversity TX module and a diversity RX.
 - **Protocol type "telemetry/telecommand":**
   - Larger frames, fragmentation, and a downlink share well above today's 1 in 15 slots (`FHSS.hpp:217`).
-  - A send queue for host data, replacing the direct `transmitDataframe()` in `src/DatalinkCommandManager.cpp:517-526`.
-  - Flow control to the host (`ChannelState`).
-  - A safe serial framing (the known issue about `0x7F`/no CRC), which is a serial protocol break, so bump `ExVectrLinkVersion`.
-  - A vehicle RX env in the plain `SerialTelecoms` role (`platformio.ini`), with a UART that doesn't collide with `Serial` (known issues).
+  - A send queue for host data through `queueOtaPacket*()` in `src/DatalinkCommandManager.cpp` (the old direct `transmitDataframe()` path from the serial host was removed).
+  - Flow control to the host.
+  - A new, safely framed host interface. The old `SerialTelecoms` protocol was removed (see [serial-protocol.md](serial-protocol.md)) and is not to be restored as it was.
+  - A vehicle RX env for that host interface (`platformio.ini`), with a UART that doesn't collide with `Serial`.
 - **RC in Starship mode:** the Pocket's switch states must still reach the vehicle with every frame, as repeated state.
 
 ## 2. TX-module USB bridge
 
 Forward ExVectrNetwork data frames both ways between the TX module's native USB (ESP32-S3 CDC) and the air link, next to the existing CRSF relay. The ground station connects here during flight tests.
 
+The old `SerialTelecoms` protocol is gone, so the bridge's host protocol has to be designed (with safe framing and flow control) rather than reused.
+
 USB was chosen over WiFi because WiFi shares the 2.4 GHz band with the link (see the workspace `docs/system-architecture.md`).
 
 Code it would touch:
-- **`src/main.cpp`:** on the TX module, `Serial` is USB CDC (`ARDUINO_USB_CDC_ON_BOOT=1`) and is used by `DebugMonitor` (`src/main.cpp:299-417`). The bridge would run a `SerialTelecoms` (or its successor) on `Serial` in `ENABLE_CRSF_INPUT` builds, where today `serialTelecoms` is removed (`src/main.cpp:695-698`), and move debug printing elsewhere or behind a flag.
-- **`src/DatalinkCommandManager.cpp`:** the serial ↔ OTA data path already exists for plain builds (`PacketData` both ways). It needs the queueing and flow-control fixes above, and must keep RC channels at their priority (`queueOtaPacketSecond`).
-- **`src/WifiUpload.cpp:188-193`:** the "serial host lost → start WiFi" rule must not apply to the bridge. It also should not apply to the vehicle RX.
+- **`src/main.cpp`:** on the TX module, `Serial` is USB CDC (`ARDUINO_USB_CDC_ON_BOOT=1`) and is used by `DebugMonitor` (`src/main.cpp:299-417`). The bridge would run its host protocol on `Serial` in `ENABLE_CRSF_INPUT` builds and move debug printing elsewhere or behind a flag.
+- **`src/DatalinkCommandManager.cpp`:** the serial ↔ OTA data path was removed. A new one needs queueing and flow control, and must keep RC channels at their priority (`queueOtaPacketSecond`). The OTA `Data` type is still used for RC channels and CRSF telemetry relay, so a host path needs its own tag or sub-type.
+- **`src/WifiUpload.cpp`:** the old "serial host lost → start WiFi" rule is gone and must not come back for the bridge or the vehicle RX.
 - **Upload paths:** a USB-connected ground station could also replace WiFi for firmware updates later (not decided).
 
 ## 3. Related cleanup that the above depends on
@@ -70,4 +72,4 @@ These come from [known-issues.md](known-issues.md). They are prerequisites rathe
 - Gate or remove the over-the-air test and upload commands for flight use, and revisit the 60 s sync failsafe.
 - Use the parity-checked type byte on air, or an equivalent check, before adding more types.
 - Bind or a per-system key, so two systems at one field can't interfere.
-- Align the flight software's ExVectrNetwork/ExVectrCore pins with this repo's, so `SerialTelecomsDatalink` can be used on the Teensy (a cross-project change).
+- Decide the vehicle-side host interface (the flight computer link) and, if it needs newer ExVectrNetwork/ExVectrCore APIs than the flight software pins, align those pins (a cross-project change). `SerialTelecomsDatalink` no longer exists.

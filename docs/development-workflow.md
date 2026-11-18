@@ -50,13 +50,13 @@ The user also develops in `~/Development/PlatformIO/ExVectrLink`. The copy insid
   ```
   Known exception: `lib/SBUS` (see [known-issues.md](known-issues.md)).
 - **No dirty submodules** when committing the parent (`git status` must not show ` m lib/...`).
-- The ExVectr libraries are shared with the flight software, which pins its own versions. ExVectrLink's ExVectrNetwork pin (7cb0e79) is 29 commits ahead of the flight software's (cabddce) and has a different datalink API. See [serial-protocol.md](serial-protocol.md#using-it-from-a-host-serialtelecomsdatalink-and-linkmanager).
+- The ExVectr libraries are shared with the flight software, which pins its own versions. ExVectrLink's ExVectrNetwork pin (7cb0e79) is 29 commits ahead of the flight software's (cabddce) and has a different datalink API.
 
 ## Compatibility and version bumps
 
 - **FPV first:** existing FPV setups (TX module → RX with CRSF to Betaflight/INAV) must keep working with the default settings. New behaviour is opt-in at runtime.
 - **Air protocol** (frame layout, trailer, type bytes, timing): both ends must run compatible firmware. On an incompatible change, bump `FHSS::OTA_VERSION` (`lib/ExVectrLink/include/ExVectrLink/datalink/FHSS.hpp:184`). It seeds the trailer checksum, so mismatched ends simply reject each other's packets instead of misreading them.
-- **Serial protocol:** bump `ExVectrLinkVersion` (`lib/ExVectrLink/include/ExVectrLink/serial/SerialTelecoms.hpp:20`). It is part of the second start byte, so mismatched hosts don't decode anything. Any Starship flight-software change that depends on the bump is a cross-project change.
+- **Serial protocol:** removed (see [serial-protocol.md](serial-protocol.md)); `ExVectrLinkVersion` no longer exists. A future host interface needs its own version rule, agreed when it is designed.
 - **EEPROM layout:** give a settings struct a new `kStorageKey` when its layout changes ([settings.md](settings.md)).
 
 ## Commit conventions

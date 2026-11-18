@@ -1,8 +1,8 @@
 # ExVectrLink
 
 Radio link firmware (PlatformIO, Arduino) for ESP32 / ESP32-S3 / ESP8285 boards with one or two SX1280 2.4 GHz radios. One code base builds both ends of the link:
-- **TX side** (handset end): the TX module in a handset's external module bay (CRSF from EdgeTX, for example a Radiomaster Pocket), plus the older ExVectrController board.
-- **RX side** (vehicle end): receivers that output CRSF to a flight controller, or talk the ExVectrLink serial protocol (`SerialTelecoms`) to a host computer.
+- **TX side** (handset end): the TX module in a handset's external module bay (CRSF from EdgeTX, for example a Radiomaster Pocket).
+- **RX side** (vehicle end): receivers that output CRSF to a flight controller.
 
 The link library itself is the `lib/ExVectrLink` submodule. Packet formats are in `lib/ExVectrPackets`.
 
@@ -10,7 +10,7 @@ The link library itself is the `lib/ExVectrLink` submodule. Packet formats are i
 
 Part of the ExVectrStarship workspace (`../CLAUDE.md`). This file and `docs/` are enough to work on ExVectrLink on its own.
 
-**Read [docs/README.md](docs/README.md) first.** It indexes how the firmware works: air protocol, serial protocol, CRSF, targets, known issues. Don't re-derive these from scratch.
+**Read [docs/README.md](docs/README.md) first.** It indexes how the firmware works: air protocol, CRSF, targets, known issues. Don't re-derive these from scratch.
 
 ## Rules
 
@@ -26,8 +26,7 @@ Part of the ExVectrStarship workspace (`../CLAUDE.md`). This file and `docs/` ar
   - Never pin an unpushed submodule commit on `Development` or `master`.
   - `lib/SBUS` is pinned to a commit that may only exist locally (fetched by hand). Leave it alone.
 - **Compatibility:**
-  - Keep the air protocol and the serial protocol backward compatible unless a break is agreed.
-  - A serial-protocol break bumps `ExVectrLinkVersion` (`lib/ExVectrLink/include/ExVectrLink/serial/SerialTelecoms.hpp:20`).
+  - Keep the air protocol backward compatible unless a break is agreed. The host serial protocol was removed (see [docs/serial-protocol.md](docs/serial-protocol.md)).
   - An air-protocol break bumps `FHSS::OTA_VERSION` (`lib/ExVectrLink/include/ExVectrLink/datalink/FHSS.hpp:184`).
   - Both ends must then be flashed together.
 - **Lossy link:** safety-relevant information is sent as continuously repeated state, never as a one-shot event (`../docs/safety.md` section 2).
@@ -42,7 +41,6 @@ The PlatformIO binary on this machine is `~/.platformio/penv/bin/pio`. Run it fr
 ~/.platformio/penv/bin/pio run -e exvectrlink_tx_module                # TX module, 1 radio
 ~/.platformio/penv/bin/pio run -e exvectrlink_genericdiversity_lr_ota  # RX, ESP32 + 2 radios, CRSF out
 ~/.platformio/penv/bin/pio run -e exvectrlink_generic_esp8285_ota      # RX, ESP8285, CRSF out
-~/.platformio/penv/bin/pio run -e exvectrlink_controller_usb           # old ExVectrController board
 ```
 
 - Every env is described in [docs/build-targets-and-hardware.md](docs/build-targets-and-hardware.md).
