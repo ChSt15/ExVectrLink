@@ -153,8 +153,7 @@ void CRSFRcOutput::taskInit() {
 void CRSFRcOutput::taskCheck() {
   // Wake early to drain any bytes that couldn't be flushed last cycle
   // because the FC's UART was momentarily full, so they go out as soon as
-  // the port has room rather than waiting a whole task period. Mirrors
-  // SerialTelecoms::taskCheck().
+  // the port has room rather than waiting a whole task period.
   if (crsf_.pendingTxBytes() > 0) {
     setDeadline(Core::NowNs());
   }

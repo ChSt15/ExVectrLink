@@ -4,7 +4,6 @@
 
 #include "ExVectrLink/datalink/LinkSettings.hpp"
 #include "ExVectrLink/datalink/PacketTypes.hpp"
-#include "ExVectrLink/serial/SerialTelecomPackets.hpp"
 
 #include "DatalinkSetup.hpp"
 #include "DiversitySetup.hpp"
@@ -21,8 +20,6 @@
 #include "DatalinkCommandManager.hpp"
 
 namespace VCTR::ExVectrLink::datalink {
-
-using namespace VCTR::ExVectrLink::packets;
 
 uint8_t packetNumber = 0;
 
@@ -159,22 +156,6 @@ public:
 
 static uint8_t quantizeLinkQualityPercent(float lq);
 
-static uint16_t getLocalRcPacketRateHz() {
-#if defined(ENABLE_CRSF)
-  return VCTR::ExVectrLink::getCrsfRcPacketRateHz();
-#else
-  return 0;
-#endif
-}
-
-static uint16_t getLocalCrsfTxFailureRateHz() {
-#if defined(ENABLE_CRSF)
-  return VCTR::ExVectrLink::getCrsfTxFailureRateHz();
-#else
-  return 0;
-#endif
-}
-
 static uint32_t getLocalMaxRcFrameGapUs() {
 #if defined(ENABLE_CRSF)
   return VCTR::ExVectrLink::getCrsfMaxRcFrameGapUs();
@@ -192,20 +173,6 @@ static const VCTR::network::datalink::Sx1280_DirectI &getLinkStatsRadio() {
 }
 
 int8_t getLocalTxPowerdBm() { return getDatalinkRadioA().getTxPower(); }
-
-static void applyLocalTxPowerToRadios() {
-  const int8_t txPowerDbm = getDynamicPower().getPower();
-  getDatalinkRadioA().setTxPower(txPowerDbm);
-#if defined(HAS_DIVERSITY)
-  getDatalinkRadioB().setTxPower(txPowerDbm);
-#endif
-}
-
-VCTR::ExVectrLink::SerialTelecoms *serialTelecomsPtr = nullptr;
-
-VCTR::Core::StaticCallback_Subscriber<const char *> logSubscriber;
-
-SerialPacket_LinkInfo linkInfoPacket;
 
 // ---------------------------------------------------------------------------
 // Helpers: encode / decode the compact 5-byte OTA LinkInfo payload
@@ -393,11 +360,6 @@ public:
   }
 
   void taskThread() override {
-
-    if (serialTelecomsPtr == nullptr) {
-      return;
-    }
-
     const int64_t now = Core::NowNs();
 
     if (now - lastLinkTelemetrySendTime > kLinkTelemetryIntervalNs) {
@@ -413,53 +375,7 @@ public:
   }
 
   void sendLinkTelemetryPacket() {
-    const auto &radio = getLinkStatsRadio();
-    auto &dynamicPower = getDynamicPower();
-
-    // --- Fill local side stats ---
-    linkInfoPacket.local.rssi = (int8_t)radio.getPacketRSSI();
-    linkInfoPacket.local.snr = (int8_t)radio.getPacketSNR();
-    linkInfoPacket.local.antenna = getLocalTxAntennaIndex();
-    const uint8_t localLinkQuality =
-        quantizeLinkQualityPercent(getFhss().getLinkQuality());
-    linkInfoPacket.local.linkQuality = localLinkQuality;
-    linkInfoPacket.local.lossRate = (uint8_t)(100 - localLinkQuality);
-    // Same value as linkQuality -- kept only for serial wire-format
-    // compatibility with existing hosts.
-    linkInfoPacket.local.packetQuality = localLinkQuality;
-    const int8_t localTxPowerdBm = getLocalTxPowerdBm();
-    linkInfoPacket.local.txPower = localTxPowerdBm;
-    linkInfoPacket.local.dynamicPower = dynamicPower.isDynamicPowerEnabled();
-    linkInfoPacket.local.desyncCount = getFhss().getDesyncCounter();
-    linkInfoPacket.local.packetRate = getLocalRcPacketRateHz();
-    linkInfoPacket.local.crsfTxFailures = getLocalCrsfTxFailureRateHz();
-
-    // --- Fill remote side stats (from last received OTA LinkTelemetry) ---
-    linkInfoPacket.remote.rssi = remoteStats.rssi;
-    linkInfoPacket.remote.snr = remoteStats.snr;
-    linkInfoPacket.remote.antenna = remoteStats.antenna;
-    linkInfoPacket.remote.linkQuality = remoteStats.linkQuality;
-    linkInfoPacket.remote.lossRate = (uint8_t)(100 - remoteStats.linkQuality);
-    linkInfoPacket.remote.packetQuality = remoteStats.linkQuality;
-    linkInfoPacket.remote.txPower = remoteStats.txPowerdBm;
-    linkInfoPacket.remote.dynamicPower = remoteStats.dynamicPower;
-    linkInfoPacket.remote.desyncCount = rxDesyncCount;
-    linkInfoPacket.remote.packetRate = rxPacketRateHz;
-    linkInfoPacket.remote.crsfTxFailures = rxCrsfTxFailures;
-
-    linkInfoPacket.remoteValid = remoteStats.valid;
-
-    if (getFhss().getFhssState() != FHSSState::Synced) {
-      // If not synced, override link quality to 0 and mark remote as invalid.
-      linkInfoPacket.remote.linkQuality = 0;
-      linkInfoPacket.remote.packetQuality = 0;
-      linkInfoPacket.remoteValid = false;
-    }
-
-    // Send combined stats to the serial host.
-    serialTelecomsPtr->sendSerialPacket(linkInfoPacket);
-
-    // Also broadcast our link stats to the other end over-the-air.
+    // Broadcast our link stats to the other end over-the-air.
     queueOtaPacketSecond(OtaSendKey::LinkTelemetry,
                          buildLinkTelemetryOtaPacket());
   }
@@ -498,85 +414,7 @@ public:
 
 } linkInfoSender;
 
-void printToSerial(const char *const &message) {
-  if (serialTelecomsPtr != nullptr) {
-    SerialPacket_Print packet;
-    strncpy(packet.message, message, sizeof(packet.message) - 1);
-    packet.length = strnlen(packet.message, sizeof(packet.message) - 1);
-    serialTelecomsPtr->sendSerialPacket(packet);
-  }
-}
-
-void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
-
-  serialTelecomsPtr = &serialTelecoms;
-
-  // logSubscriber.subscribe(VCTR::Core::getDebugTopic());
-  // logSubscriber.setCallbackFunction(printToSerial);
-
-  serialTelecoms.addSerialPacketHandler(
-      SerialPacketType::PacketData,
-      [&serialTelecoms](const Core::ListArray<uint8_t> &data) {
-        if (data.size() > 0) {
-          network::DataPacket packet(data);
-          // Append the type byte so the far end knows this is a data packet.
-          packet.payload.append((uint8_t)PacketTypes::Data);
-          getFhss().transmitDataframe(packet);
-        }
-      });
-
-  serialTelecoms.addSerialPacketHandler<SerialPacket_SetModulationPreset>(
-      [&serialTelecoms](const SerialPacket_SetModulationPreset &packet) {
-        const auto &modParams = modulationPresets[packet.presetIndex];
-        getDatalinkRadioA().setCodingRate(modParams.codingRate);
-        getDatalinkRadioA().setSpreadingFactor(modParams.spreadingFactor);
-        getDatalinkRadioA().setBandwidth(modParams.bandwidth);
-
-#if defined(HAS_DIVERSITY)
-        getDatalinkRadioB().setCodingRate(modParams.codingRate);
-        getDatalinkRadioB().setSpreadingFactor(modParams.spreadingFactor);
-        getDatalinkRadioB().setBandwidth(modParams.bandwidth);
-#endif
-      });
-
-  serialTelecoms.addSerialPacketHandler<SerialPacket_SetPowerParams>(
-      [](const SerialPacket_SetPowerParams &packet) {
-        auto &dynamicPower = getDynamicPower();
-        const uint8_t requestedMaxPower =
-            (packet.txPower == 0) ? 255 : packet.txPower;
-        const uint8_t requestedDynMaxPower =
-            (packet.maxDynPower == 0) ? requestedMaxPower : packet.maxDynPower;
-        const uint8_t requestedDynMinPower = (packet.minDynPower == 0)
-                                                 ? DynamicPower::kPowerLevels[0]
-                                                 : packet.minDynPower;
-
-        dynamicPower.setMaxPower(requestedMaxPower);
-        dynamicPower.setEnableDynamicPower(packet.enableDynamicPower);
-
-        dynamicPower.setDynMaxPower(requestedDynMaxPower);
-        dynamicPower.setDynMinPower(requestedDynMinPower);
-
-        if (!packet.enableDynamicPower) {
-          dynamicPower.setPower(requestedMaxPower);
-        }
-
-        applyLocalTxPowerToRadios();
-        // Persist the dynamic min/max and enable flag (the hardware limit is a
-        // board property and stays out of the store).
-        saveRfSettings();
-      });
-
-  serialTelecoms.addSerialPacketHandler<SerialPacket_SetLinkChannel>(
-      [&serialTelecoms](const SerialPacket_SetLinkChannel &packet) {
-        // getFhss().enableFhss(false);
-        // getSx1280Diversity().setChannel(packet.channelIndex);
-      });
-
-  serialTelecoms.addSerialPacketHandler<SerialPacket_SetEnableFhss>(
-      [&serialTelecoms](const SerialPacket_SetEnableFhss &packet) {
-        // getFhss().enableFhss(packet.enable);
-        getFhss().setFhssKey(packet.seqKey);
-      });
+void initCommandManager() {
 
   // Any valid FHSS packet -- with or without payload data -- proves the far
   // end is still transmitting. The receive handler below only fires for
@@ -593,8 +431,7 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
   });
 
   // Receiving info from far end over FHSS
-  getFhss().addReceiveHandler([&serialTelecoms](
-                                  const VCTR::network::DataPacket &packet) {
+  getFhss().addReceiveHandler([](const VCTR::network::DataPacket &packet) {
     // Serial.printf("Received %d byte FHSS packet with payload: ",
     //               packet.payload.size());
     // for (size_t i = 0; i < packet.payload.size(); i++) {
@@ -614,19 +451,8 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
     // Last byte is always the packet type.
     uint8_t pktType = packet.payload[packet.payload.size() - 1];
 
-    if (pktType == (uint8_t)PacketTypes::Data) {
-      // Strip the type byte and forward raw data to the serial host.
-      serialTelecoms.sendSerialPacket(SerialPacketType::PacketData,
-                                      packet.payload.getPtr(),
-                                      packet.payload.size() - 1);
-
-    } else if (pktType == (uint8_t)PacketTypes::LinkTelemetry) {
-      // Decode the 5-byte OTA link telemetry and forward to serial host.
-      // if (packet.payload.size() < 8)
-      //   return;
-      // Decode into remoteStats cache; the next LinkInfoSender tick will
-      // bundle this into the combined SerialPacket_LinkInfo sent to the
-      // host.
+    if (pktType == (uint8_t)PacketTypes::LinkTelemetry) {
+      // Decode the 5-byte OTA link telemetry into the remoteStats cache.
       float lq;
       float snrF;
       int8_t remRssi;
@@ -673,7 +499,7 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
       rxMissedSlots = remMissedSlots;
       rxMaxRcGapUs = remMaxRcGapUs;
     } else if (pktType == (uint8_t)PacketTypes::UploadMode) {
-      // OTA upload mode packet -- forward to serial host.
+      // OTA upload mode packet.
       VCTR::WifiUpload::startWiFiUploadMode();
     } else if (pktType == (uint8_t)PacketTypes::TestBlock) {
       // Deliberately blocks right here, inside the FHSS receive-handler
@@ -703,13 +529,6 @@ void initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
     }
     // Other types are silently ignored for now.
   });
-
-  // getFhss().addChannelBlockedChangeHandler(
-  //     [&serialTelecoms](bool blocked, uint8_t maxPacketSize) {
-  //       SerialPacket_ChannelState packet{maxPacketSize, blocked};
-  //       serialTelecoms.sendSerialPacket(packet);
-  //       serialTelecoms.forcePacketSendNow();
-  //     });
 }
 
 } // namespace VCTR::ExVectrLink::datalink

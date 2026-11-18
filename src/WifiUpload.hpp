@@ -1,11 +1,9 @@
 #ifndef EXVECRLINK_WIFIUPLOAD_HPP
 #define EXVECRLINK_WIFIUPLOAD_HPP
 
-#include "ExVectrLink/serial/SerialTelecoms.hpp"
-
 namespace VCTR::WifiUpload {
 
-void initWifiUpload(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms);
+void initWifiUpload();
 
 void loopWifiUpload();
 

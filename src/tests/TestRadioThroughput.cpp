@@ -4,8 +4,6 @@
 #include "ExVectrCore/scheduler2.hpp"
 #include "ExVectrCore/task_types.hpp"
 
-#include "ExVectrLink/serial/SerialTelecoms.hpp"
-
 #include "Config.hpp"
 #include "Hardware.hpp"
 

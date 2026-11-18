@@ -5,10 +5,6 @@
 #include "targets/GenericDiversityELRS.hpp"
 #endif
 
-#if defined(TARGET_EXVECTRCONTROLLER)
-#include "targets/ExVectrControllerLink.hpp"
-#endif
-
 #if defined(TARGET_EXVECTRLINKTXMODULE)
 #include "targets/ExVectrLinkTxModule.hpp"
 #endif
@@ -29,8 +25,7 @@
 // (IS_TX_SIDE) or the receiver in the aircraft. Anything that differs between
 // the two ends -- the RX running at a fixed transmit power, the TX carrying
 // the CRSF configuration menu -- keys off this rather than re-listing targets.
-#if defined(TARGET_EXVECTRCONTROLLER) ||                                       \
-    defined(TARGET_EXVECTRLINKTXMODULE) ||                                     \
+#if defined(TARGET_EXVECTRLINKTXMODULE) ||                                     \
     defined(TARGET_EXVECTRLINKTXMODULEDIVERSITY)
 #define IS_TX_SIDE
 #endif

@@ -128,7 +128,7 @@ public:
   /// @returns the number of buffered outgoing bytes not yet accepted by the
   /// port (>0 means a later flush -- e.g. via available() -- still has work
   /// to do because the port was full). Useful for waking a task early to
-  /// drain the backlog, the way SerialTelecoms does.
+  /// drain the backlog.
   size_t pendingTxBytes() const { return txBuffer_.size(); }
 
   // ── RX ──

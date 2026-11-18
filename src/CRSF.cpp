@@ -240,8 +240,7 @@ void CRSF::flushTx() {
   // keeps this strictly non-blocking. Loop so a whole frame goes out in a
   // single call whenever there is room (rather than one IO_CHUNK_SIZE slice
   // per call); the loop is naturally bounded because each write shrinks the
-  // port's free space until it hits 0, or the buffer empties. Same approach
-  // as SerialTelecoms::taskThread()'s writeData().
+  // port's free space until it hits 0, or the buffer empties.
   uint8_t buf[IO_CHUNK_SIZE];
   while (txBuffer_.size() > 0) {
     const size_t writable = portWritable();

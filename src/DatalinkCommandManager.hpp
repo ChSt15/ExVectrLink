@@ -6,8 +6,6 @@
 #include "ExVectrNetwork/DataPacket.hpp"
 #include "ExVectrNetwork/datalink/sx1280/Sx1280_2.hpp"
 
-#include "ExVectrLink/serial/SerialTelecoms.hpp"
-
 namespace VCTR::ExVectrLink::datalink {
 
 /// Decoded far-end link telemetry received via OTA LinkInfo packets.
@@ -64,8 +62,7 @@ enum class OtaSendKey : uint8_t {
                      ///< PacketTypes::ResetRcGapStat).
 };
 
-extern void
-initCommandManager(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms);
+extern void initCommandManager();
 
 /// Queues `packet` for transmission over the FHSS OTA link, coalesced by
 /// `key` (see OtaSendKey/OtaPacketQueue) so independent senders share the

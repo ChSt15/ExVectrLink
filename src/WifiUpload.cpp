@@ -24,8 +24,6 @@
 #include "Hardware.hpp"
 #include "WifiUpload.hpp"
 
-#include "ExVectrLink/serial/SerialTelecomPackets.hpp"
-#include "ExVectrLink/serial/SerialTelecoms.hpp"
 
 namespace VCTR::WifiUpload {
 extern const char *ssid;
@@ -33,10 +31,6 @@ extern const char *password;
 } // namespace VCTR::WifiUpload
 
 namespace VCTR::WifiUpload {
-
-using namespace VCTR::ExVectrLink;
-
-SerialTelecoms *serialTelecomsPtr = nullptr;
 
 class WiFiTimeSync : public Core::Task_Periodic {
 private:
@@ -141,16 +135,9 @@ void startButtonWifiUploadMode() {
   Core::getSystemScheduler().addTask(wifiTimeSync);
 }
 
-void initWifiUpload(VCTR::ExVectrLink::SerialTelecoms &serialTelecoms) {
+void initWifiUpload() {
 
   pinMode(HardwareConfig::button, INPUT_PULLUP);
-
-  serialTelecomsPtr = &serialTelecoms;
-  serialTelecomsPtr->addSerialPacketHandler(
-      packets::UpdateMode, [](const Core::ListArray<uint8_t> &data) {
-        wifiTimeSync.startUploadMode();
-        serialTelecomsPtr->sendSerialPacket(packets::UpdateMode, 0);
-      });
 
 #ifdef ENABLE_FORCEWIFI
   wifiTimeSync.startUploadMode();
@@ -184,13 +171,6 @@ void loopWifiUpload() {
     } else {
       buttonPressed = false;
     }
-
-#if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF)
-    if (millis() > 10000 &&
-        (serialTelecomsPtr != nullptr && !serialTelecomsPtr->isConnected())) {
-      wifiTimeSync.startUploadMode();
-    }
-#endif
   }
 }
 

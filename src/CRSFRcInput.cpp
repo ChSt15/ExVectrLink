@@ -1040,10 +1040,8 @@ void CRSFRcInput::forwardRcChannels(
   lastRcPacketTime_ = Core::NowNs();
   rcFrameCount_++;
 
-  // Forward straight to the FHSS uplink, tagged the same way SerialTelecoms'
-  // PacketData handler does it (see DatalinkCommandManager.cpp), so the
-  // receive side (CRSFRcOutput) doesn't need to know or care whether the RC
-  // data came from CRSF or a serial host app. Queued (not sent directly) so
+  // Forward straight to the FHSS uplink, tagged as a PacketTypes::Data
+  // frame. Queued (not sent directly) so
   // it shares the single-slot channel with link stats/telemetry instead of
   // racing to overwrite whichever of them is currently pending -- but queued
   // into the SECOND position (see queueOtaPacketSecond()): a burst of queued

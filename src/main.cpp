@@ -6,7 +6,6 @@
 #include "ExVectrCore/scheduler2.hpp"
 
 #include "ExVectrLink/datalink/PacketTypes.hpp"
-#include "ExVectrLink/serial/SerialTelecoms.hpp"
 
 #include "ExVectrPackets/Packets.hpp"
 #include "ExVectrPackets/radiolink/packets/RadioLinkPackets.hpp"
@@ -38,57 +37,8 @@ using namespace VCTR;
 using namespace VCTR::ExVectrLink;
 
 #if defined(ESP32)
+// UART used by CRSFRcInput on the TX module (see below).
 HardwareSerial linkSerialPort(1);
-Platform::BusUART serialBus(linkSerialPort);
-#else
-Platform::BusUART serialBus(Serial);
-#endif
-SerialTelecoms serialTelecoms(serialBus);
-
-#if defined(ESP32)
-class TempMonitor : public Core::Task_Periodic {
-public:
-  TempMonitor() : Core::Task_Periodic("TempMonitor", 5 * Core::SECONDS) {
-    Core::getSystemScheduler().addTask(*this);
-  }
-
-  void taskInit() override {}
-
-  void taskThread() override {
-    int8_t temp = temperatureRead();
-    serialTelecoms.sendSerialPacket(
-        VCTR::ExVectrLink::packets::SerialPacket_DeviceTemperature{temp});
-  }
-};
-TempMonitor tempMonitor;
-#endif
-
-#if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF) &&                          \
-    !defined(ENABLE_CRSF_INPUT)
-class SyncedMonitor : public Core::Task_Periodic {
-private:
-  VCTR::ExVectrLink::datalink::FHSSState lastState =
-      VCTR::ExVectrLink::datalink::FHSSState::Searching;
-
-public:
-  SyncedMonitor()
-      : Core::Task_Periodic("SyncedMonitor", 500 * Core::MILLISECONDS) {
-    Core::getSystemScheduler().addTask(*this);
-  }
-
-  void taskInit() override {}
-
-  void taskThread() override {
-    auto fhssState = VCTR::ExVectrLink::datalink::getFhss().getFhssState();
-
-    Serial.println("FHSS Sync State: " + String((int)fhssState));
-
-    VCTR::ExVectrLink::packets::SerialPacket_FhssSyncState packet{
-        fhssState == VCTR::ExVectrLink::datalink::FHSSState::Synced};
-    serialTelecoms.sendSerialPacket(packet);
-  }
-};
-SyncedMonitor syncedMonitor;
 #endif
 
 #if defined(ENABLE_SBUS)
@@ -416,98 +366,6 @@ public:
 DebugMonitor debugMonitor;
 #endif
 
-#if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF) &&                          \
-    !defined(ENABLE_CRSF_INPUT)
-class ErrorSender : public Core::Task_Periodic {
-public:
-  ErrorSender() : Core::Task_Periodic("ErrorSender", 0.1001 * Core::SECONDS) {
-    Core::getSystemScheduler().addTask(*this);
-  }
-
-  void taskInit() override {}
-
-  void taskThread() override {
-    auto error = !radio::radioDriversInitialized();
-    // network::DataPacket packet;
-    // packet.payload.setSize(5);
-    // datalink::getFhss().transmitDataframe(packet);
-
-    if (error) {
-      radio::initRadioDrivers();
-      auto error2 = !radio::radioDriversInitialized();
-      String message =
-          error2
-              ? "Error: Radios failed to initialize. Retrying in 1s\n"
-              : "Error: Radios failed to initialize. Retried and succeeded\n";
-      LOG_MSG(message.c_str());
-      serialTelecoms.sendSerialPacket(VCTR::ExVectrLink::packets::Error,
-                                      message.c_str(), message.length() + 1);
-    } else {
-#ifdef ENABLE_DEBUG_OUTPUT
-      Serial.println("All good!");
-      String irqStr;
-      // if (irqFlags & IRQ_TX_DONE)
-      //   irqStr += "TX_DONE ";
-      // if (irqFlags & IRQ_RX_DONE)
-      //   irqStr += "RX_DONE ";
-      // if (irqFlags & IRQ_SYNCWORD_VALID)
-      //   irqStr += "SW_VALID ";
-      // if (irqFlags & IRQ_SYNCWORD_ERROR)
-      //   irqStr += "SW_ERR ";
-      // if (irqFlags & IRQ_HEADER_VALID)
-      //   irqStr += "HDR_VALID ";
-      // if (irqFlags & IRQ_HEADER_ERROR)
-      //   irqStr += "HDR_ERR ";
-      // if (irqFlags & IRQ_CRC_ERROR)
-      //   irqStr += "CRC_ERR ";
-      // if (irqFlags & IRQ_PREAMBLE_DETECTED)
-      //   irqStr += "PREAMBLE ";
-      // if (irqFlags & IRQ_RX_TX_TIMEOUT)
-      //   irqStr += "TIMEOUT ";
-      // if (irqFlags & IRQ_CAD_DONE)
-      //   irqStr += "CAD_DONE ";
-      // if (irqFlags & IRQ_CAD_ACTIVITY_DETECTED)
-      //   irqStr += "CAD_ACTIVE ";
-      // if (irqStr.isEmpty())
-      //   irqStr = "none";
-      String syncState;
-
-      switch (datalink::getFhss().getFhssState()) {
-      case datalink::FHSSState::Searching:
-        syncState = "Searching";
-        break;
-      case datalink::FHSSState::Syncing:
-        syncState = "Syncing";
-        break;
-      case datalink::FHSSState::Synced:
-        syncState = "Synced";
-      }
-
-      auto &radioA = VCTR::ExVectrLink::datalink::getDatalinkRadioA();
-
-      String message =
-          String() + syncState + " A: " +
-          String(
-              (double)VCTR::ExVectrLink::datalink::getFhss().getTimingOffset() /
-              Core::MILLISECONDS) +
-          " I: " +
-          String((double)VCTR::ExVectrLink::datalink::getFhss()
-                     .getTrueSlotInterval() /
-                 Core::MICROSECONDS) +
-          " RSSI:" + radioA.getPacketRSSI() + " SNR:" + radioA.getPacketSNR() +
-          " LQ:" +
-          String(VCTR::ExVectrLink::datalink::getFhss().getLinkQuality() * 100,
-                 0) +
-          "\n";
-      serialTelecoms.sendSerialPacket(VCTR::ExVectrLink::packets::Error,
-                                      message.c_str(), message.length() + 1);
-#endif
-    }
-  }
-};
-ErrorSender errorSender;
-#endif
-
 // ISR-captured state for DIO1 interrupt timestamps
 volatile uint32_t dio1MicrosA = 0;
 volatile bool dio1FiredA = false;
@@ -570,26 +428,14 @@ void setup() {
 
   // delay(5000);
 
-#if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF) &&                          \
-    !defined(ENABLE_CRSF_INPUT)
-  Serial.begin(115200);
-#endif
-
   pinMode(HardwareConfig::button, INPUT_PULLUP);
-
-  // Serial.begin(115200);
-#if !defined(ENABLE_SBUS) && !defined(ENABLE_CRSF) &&                          \
-    !defined(ENABLE_CRSF_INPUT)
-  linkSerialPort.begin(1000000, SERIAL_8N1, HardwareConfig::serialRx,
-                       HardwareConfig::serialTx);
-#endif
 
   delay(500);
 
   // Check button independently – works even when Serial is not yet open
   if (digitalRead(HardwareConfig::button) == LOW) {
     WifiUpload::startWiFiUploadMode(true);
-    WifiUpload::initWifiUpload(serialTelecoms);
+    WifiUpload::initWifiUpload();
     return;
   }
 
@@ -609,7 +455,7 @@ void setup() {
     }
     if (count >= 5) {
       WifiUpload::startWiFiUploadMode(true);
-      WifiUpload::initWifiUpload(serialTelecoms);
+      WifiUpload::initWifiUpload();
       return;
     }
   }
@@ -649,12 +495,12 @@ void setup() {
 
   ExVectrLink::radio::initRadioDrivers();
 
-  ExVectrLink::datalink::initCommandManager(serialTelecoms);
+  ExVectrLink::datalink::initCommandManager();
 
   // Note: unlike the old CRSFInput, CRSFRcInput forwards decoded RC
   // channels to the FHSS uplink internally -- no handler wiring needed here.
 
-  WifiUpload::initWifiUpload(serialTelecoms);
+  WifiUpload::initWifiUpload();
 
   auto &radioA = ExVectrLink::datalink::getDatalinkRadioA();
 #if defined(HAS_DIVERSITY)
@@ -691,11 +537,6 @@ void setup() {
   ExVectrLink::setupSettings();
   ExVectrLink::datalink::applyRfSettings();
   ExVectrLink::datalink::setupDynamicPower();
-
-#if defined(ENABLE_SBUS) || defined(ENABLE_CRSF) || defined(ENABLE_CRSF_INPUT)
-  Core::getSystemScheduler().removeTask(serialTelecoms);
-  serialTelecoms.setDisabled();
-#endif
 }
 
 void processDio1Interrupts() {
