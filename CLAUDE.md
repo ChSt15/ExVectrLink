@@ -1,0 +1,53 @@
+# ExVectrLink
+
+Radio link firmware (PlatformIO, Arduino) for ESP32 / ESP32-S3 / ESP8285 boards with one or two SX1280 2.4 GHz radios. One code base builds both ends of the link:
+- **TX side** (handset end): the TX module in a handset's external module bay (CRSF from EdgeTX, for example a Radiomaster Pocket), plus the older ExVectrController board.
+- **RX side** (vehicle end): receivers that output CRSF to a flight controller, or talk the ExVectrLink serial protocol (`SerialTelecoms`) to a host computer.
+
+The link library itself is the `lib/ExVectrLink` submodule. Packet formats are in `lib/ExVectrPackets`.
+
+**ExVectrLink is shared between the user's FPV drone projects and the ExVectrStarship system.** Every change must keep FPV use working: lowest RC latency, maximum range, CRSF output to standard flight controllers. Starship-specific behaviour is selected at runtime (planned: link modes in the Lua menu, stored in EEPROM), never hard-coded into the default behaviour. See [docs/roadmap.md](docs/roadmap.md).
+
+Part of the ExVectrStarship workspace (`../CLAUDE.md`). This file and `docs/` are enough to work on ExVectrLink on its own.
+
+**Read [docs/README.md](docs/README.md) first.** It indexes how the firmware works: air protocol, serial protocol, CRSF, targets, known issues. Don't re-derive these from scratch.
+
+## Rules
+
+- **Branching** ([docs/development-workflow.md](docs/development-workflow.md)):
+  - `master` holds the released state.
+  - `Development` is for integration.
+  - Work happens on `feature/<name>` branches cut from `Development`. Merge the latest `Development` in and re-test before merging back.
+  - Never commit directly to `master` or `Development`.
+- **Second working copy:** the user also keeps a copy at `~/Development/PlatformIO/ExVectrLink`. The two copies sync only through GitHub. Never edit that copy from here, and don't assume it is at the same commit.
+- **Submodules** (`lib/ExVectr*`, `lib/SBUS`):
+  - Library changes are committed inside the submodule, on a branch with the same name as the parent's feature branch.
+  - Never leave a submodule dirty.
+  - Never pin an unpushed submodule commit on `Development` or `master`.
+  - `lib/SBUS` is pinned to a commit that may only exist locally (fetched by hand). Leave it alone.
+- **Compatibility:**
+  - Keep the air protocol and the serial protocol backward compatible unless a break is agreed.
+  - A serial-protocol break bumps `ExVectrLinkVersion` (`lib/ExVectrLink/include/ExVectrLink/serial/SerialTelecoms.hpp:20`).
+  - An air-protocol break bumps `FHSS::OTA_VERSION` (`lib/ExVectrLink/include/ExVectrLink/datalink/FHSS.hpp:184`).
+  - Both ends must then be flashed together.
+- **Lossy link:** safety-relevant information is sent as continuously repeated state, never as a one-shot event (`../docs/safety.md` section 2).
+- **Docs are part of the change:** update the affected file in `docs/` in the same branch, including [docs/known-issues.md](docs/known-issues.md) when you find or fix a bug. Update `Last verified against commit:` when you re-verify a doc.
+
+## Build
+
+The PlatformIO binary on this machine is `~/.platformio/penv/bin/pio`. Run it from this folder:
+
+```sh
+~/.platformio/penv/bin/pio run -e exvectrlink_tx_module_diversity      # TX module (Pocket), 2 radios
+~/.platformio/penv/bin/pio run -e exvectrlink_tx_module                # TX module, 1 radio
+~/.platformio/penv/bin/pio run -e exvectrlink_genericdiversity_lr_ota  # RX, ESP32 + 2 radios, CRSF out
+~/.platformio/penv/bin/pio run -e exvectrlink_generic_esp8285_ota      # RX, ESP8285, CRSF out
+~/.platformio/penv/bin/pio run -e exvectrlink_controller_usb           # old ExVectrController board
+```
+
+- Every env is described in [docs/build-targets-and-hardware.md](docs/build-targets-and-hardware.md).
+- Build at least one RX and one TX env for every change. Check that there are no new warnings in `src/`.
+- **`src/WifiCredentials.cpp` is gitignored and must exist.** It defines `const char *VCTR::WifiUpload::ssid` and `password`. Without it the link step fails with `undefined reference to VCTR::WifiUpload::ssid`.
+- The `*_ota` envs upload over WiFi to a fixed IP (`upload_port`). Use `--upload-port` to override it.
+- On this machine PlatformIO may stall on network checks (broken IPv6).
+- Range, latency, throughput and sync can only be verified on hardware. Describe the bench test the user should run.
