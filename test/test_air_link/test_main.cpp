@@ -1,0 +1,727 @@
+// Host tests of the network-mode air link pieces that do not need FHSS itself (that is test_fhss):
+//  - FhssMath / AirProfile: time on air, slot budget, expected packet rates, trailer seeds and counters.
+//  - NetAirAccess with the real AirFrameLink: RC_STATE expiry at the slot start, priority order, downlink fill,
+//    receive mailbox, keep-alives, LQ, LINK_STATS derivation, superframe counter, direction.
+//  - RxRouter (node 3): egress filters, LINK_STATS 5 Hz, LQ 0 / Searching without air, no synthesised RC state.
+//  - UploadTriggers and NetPowerPolicy.
+//  - End to end: TX router (node 2) + air access <-> air access + RX router (node 3) over simulated 20 ms slots.
+// Run: ~/.platformio/penv/bin/pio test -e native
+#include <unity.h>
+
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <atomic>
+#include <new>
+#include <vector>
+
+#include "ExVectrLink/datalink/AirProfile.hpp"
+#include "ExVectrLink/datalink/FhssMath.hpp"
+#include "NetAirAccess.hpp"
+#include "NetworkRouter.hpp"
+#include "RxRouter.hpp"
+
+using namespace VCTR;
+using namespace VCTR::ExVectrLink::netmode;
+namespace dl = VCTR::ExVectrLink::datalink;
+namespace fm = VCTR::ExVectrLink::datalink::fhss;
+namespace net = VCTR::network;
+
+// ---- allocation hook ----
+static std::atomic<unsigned long> g_allocs{0};
+void *operator new(size_t n) {
+  g_allocs++;
+  void *p = malloc(n ? n : 1);
+  if (!p) abort();
+  return p;
+}
+void *operator new[](size_t n) { return operator new(n); }
+void operator delete(void *p) noexcept { free(p); }
+void operator delete[](void *p) noexcept { free(p); }
+void operator delete(void *p, size_t) noexcept { free(p); }
+void operator delete[](void *p, size_t) noexcept { free(p); }
+
+// ---- doubles ----
+struct FakeClock : net::TimeSourceI {
+  int64_t t = 1000000000LL;
+  int64_t nowNs() override { return t; }
+  void advanceMs(int ms) { t += static_cast<int64_t>(ms) * 1000000LL; }
+};
+
+struct Frame {
+  uint8_t d[net::kMaxNetFrame];
+  uint8_t len = 0;
+};
+
+struct RecordLink : net::FrameLinkI {
+  std::vector<Frame> sent;
+  FakeClock *clk;
+  explicit RecordLink(FakeClock &c) : clk(&c) { sent.reserve(8192); }
+  bool send(const uint8_t *f, uint8_t len, int64_t) override {
+    Frame it;
+    it.len = len;
+    memcpy(it.d, f, len);
+    sent.push_back(it);
+    stats.txOk++;
+    return true;
+  }
+  uint8_t mtu() const override { return net::kMaxNetFrame; }
+  void inject(const Frame &f) {
+    stats.rxOk++; // as a stream link counts a good frame
+    net::FrameView v{f.d, f.len, clk->nowNs()};
+    deliver(v);
+  }
+};
+
+struct CollectSink : net::FrameSinkI {
+  std::vector<Frame> got;
+  void onFrame(const net::FrameView &f, uint8_t) override {
+    Frame x;
+    x.len = f.len;
+    memcpy(x.d, f.data, f.len);
+    got.push_back(x);
+  }
+};
+
+static Frame makeData(uint8_t src, uint8_t dst, uint8_t port, uint8_t seq, const uint8_t *pl, size_t n,
+                      net::wire::Qos qos = net::wire::Qos::Telemetry, bool latest = true) {
+  Frame f;
+  net::wire::NetHeader h;
+  h.type = 0;
+  h.qos = static_cast<uint8_t>(qos);
+  h.latest = latest;
+  h.ttl = 3;
+  h.dst = dst;
+  h.src = src;
+  net::wire::encodeNetHeader(h, f.d, sizeof f.d);
+  net::wire::DataHeader dh;
+  dh.port = port;
+  dh.seq = seq;
+  net::wire::encodeDataHeader(dh, f.d + 4, sizeof f.d - 4);
+  if (n) memcpy(f.d + 6, pl, n);
+  f.len = static_cast<uint8_t>(6 + n);
+  return f;
+}
+
+static Frame makeHeartbeat(uint8_t src, uint8_t role) {
+  Frame f;
+  net::wire::NetHeader h;
+  h.type = static_cast<uint8_t>(net::wire::FrameType::Heartbeat);
+  h.qos = static_cast<uint8_t>(net::wire::Qos::Link);
+  h.latest = true;
+  h.dst = 0xFF;
+  h.src = src;
+  h.ttl = 3;
+  net::wire::encodeNetHeader(h, f.d, sizeof f.d);
+  net::wire::Heartbeat hb;
+  hb.role = role;
+  hb.schemaHash = Packets::kSchemaHash;
+  net::wire::encodeHeartbeat(hb, f.d + 4, sizeof f.d - 4);
+  f.len = 15;
+  return f;
+}
+
+static Frame rcStateFrame(uint8_t src, uint8_t dst, uint8_t seq) {
+  Packets::RcState rc;
+  rc.flags = 1;
+  for (int i = 0; i < 16; i++) rc.ch[i] = 100;
+  uint8_t buf[Packets::RcState::kMaxSize];
+  size_t n = rc.encode(buf, sizeof buf);
+  return makeData(src, dst, Packets::RcState::kPort, seq, buf, n, net::wire::Qos::Control, true);
+}
+
+static bool isData(const Frame &f, uint8_t port) { return f.len >= 6 && (f.d[0] & 0x30) == 0 && f.d[4] == port; }
+static bool isHb(const Frame &f) { return f.len >= 4 && ((f.d[0] >> 4) & 3) == 1; }
+static int countData(const std::vector<Frame> &v, uint8_t port, int src = -1, int dst = -1) {
+  int n = 0;
+  for (auto &f : v)
+    if (isData(f, port) && (src < 0 || f.d[3] == src) && (dst < 0 || f.d[2] == dst)) n++;
+  return n;
+}
+static int countHb(const std::vector<Frame> &v, int src) {
+  int n = 0;
+  for (auto &f : v)
+    if (isHb(f) && f.d[3] == src) n++;
+  return n;
+}
+
+/// Parses an air packet into frames.
+static std::vector<Frame> parseAir(const uint8_t *buf, size_t n) {
+  std::vector<Frame> out;
+  net::wire::AirPacketReader r;
+  if (!r.parse(buf, n)) return out;
+  const uint8_t *f;
+  size_t fl;
+  while (r.next(f, fl)) {
+    Frame x;
+    memcpy(x.d, f, fl);
+    x.len = static_cast<uint8_t>(fl);
+    out.push_back(x);
+  }
+  return out;
+}
+
+// =========================================================================================== FhssMath, profiles
+
+void test_time_on_air_profile_v1() {
+  const float us = fm::loraTimeOnAirUs(dl::kNetworkProfileV1.lora, 255);
+  TEST_ASSERT_FLOAT_WITHIN(5.0f, 10560.0f, us); // the user's figure (Revision 1): 10.56 ms
+  // 8 symbols and no CRC (the alternative in the Revision box): 10.38 ms
+  fm::LoRaParams p = dl::kNetworkProfileV1.lora;
+  p.preamble = 8;
+  p.crcOn = false;
+  TEST_ASSERT_FLOAT_WITHIN(5.0f, 10380.0f, fm::loraTimeOnAirUs(p, 255));
+  // Design table 2.3 cross-check: SF5/BW800/CR4/6, explicit header, 255 B = 25.4 ms
+  fm::LoRaParams d{5, 812500, 2, 12, true, true};
+  TEST_ASSERT_FLOAT_WITHIN(100.0f, 25400.0f, fm::loraTimeOnAirUs(d, 255));
+}
+
+void test_slot_budget() {
+  // network: 10.56 ms in 20 ms with 2 ms guard fits; it would not fit a 10 ms slot
+  TEST_ASSERT_TRUE(fm::slotFits(dl::kNetworkProfileV1.lora, 255, dl::kNetworkProfileV1.slotIntervalNs, 2000000));
+  TEST_ASSERT_FALSE(fm::slotFits(dl::kNetworkProfileV1.lora, 255, 10000000, 0));
+  // FPV profile fits its 10 ms slot
+  TEST_ASSERT_TRUE(fm::slotFits(dl::kFpvProfile.lora, dl::kFpvProfile.onAirBytes, dl::kFpvProfile.slotIntervalNs, 1000000));
+  // the network wakeup lead leaves the busy-wait inside the slot
+  TEST_ASSERT_TRUE(dl::kNetworkProfileV1.wakeupLeadNs < dl::kNetworkProfileV1.slotIntervalNs / 4);
+}
+
+void test_expected_rates() {
+  const auto &n = dl::kNetworkProfileV1;
+  TEST_ASSERT_EQUAL_UINT32(25, fm::expectedRxPacketsPerSecond(false, n.rolePeriod, n.slotIntervalNs));
+  TEST_ASSERT_EQUAL_UINT32(25, fm::expectedRxPacketsPerSecond(true, n.rolePeriod, n.slotIntervalNs));
+  const auto &f = dl::kFpvProfile;
+  TEST_ASSERT_EQUAL_UINT32(6, fm::expectedRxPacketsPerSecond(false, f.rolePeriod, f.slotIntervalNs));  // 6.7
+  TEST_ASSERT_EQUAL_UINT32(93, fm::expectedRxPacketsPerSecond(true, f.rolePeriod, f.slotIntervalNs));  // 93.3
+}
+
+void test_slot_roles_one_to_one() {
+  // rolePeriod 2: the role counter alternates 0,1; master transmits on 1, follower on 0: exactly one TX per slot.
+  for (size_t c = 0; c < 2; c++) TEST_ASSERT_TRUE(fm::slotIsTx(false, c) != fm::slotIsTx(true, c));
+  int masterTx = 0;
+  for (size_t c = 0; c < 15; c++) masterTx += fm::slotIsTx(false, c);
+  TEST_ASSERT_EQUAL_INT(14, masterTx); // FPV: 14 of 15
+}
+
+void test_trailer_counters_and_seeds() {
+  // FPV golden values (trailer byte 1 and the checksum seeds as FHSS always produced them)
+  TEST_ASSERT_EQUAL_HEX8((14 << 2) | 3, fm::trailerCounterByte(14, 15, 3, 4));
+  TEST_ASSERT_EQUAL_HEX8((1 << 2) | 0, fm::trailerCounterByte(16, 15, 4, 4));
+  TEST_ASSERT_EQUAL_HEX8(0x02, fm::trailerSeed(0, 2, false));
+  TEST_ASSERT_EQUAL_HEX8(0x42, fm::trailerSeed(0, 2, true));
+  // network seeds differ from both FPV seeds in both directions
+  const uint8_t nTx = fm::trailerSeed(dl::kNetworkProfileV1.hopKey, dl::kNetworkProfileV1.linkVersion, false);
+  const uint8_t nRx = fm::trailerSeed(dl::kNetworkProfileV1.hopKey, dl::kNetworkProfileV1.linkVersion, true);
+  const uint8_t all[4] = {0x02, 0x42, nTx, nRx};
+  for (int i = 0; i < 4; i++)
+    for (int j = i + 1; j < 4; j++) TEST_ASSERT_NOT_EQUAL(all[i], all[j]);
+  const uint8_t d[3] = {0xAA, 0x0F, 0x11};
+  TEST_ASSERT_EQUAL_HEX8(0x02 ^ 0xAA ^ 0x0F ^ 0x11, fm::trailerChecksum(0x02, d, 3));
+  TEST_ASSERT_EQUAL_UINT8(3, fm::trailerSlotCounter((5 << 2) | 3));
+  TEST_ASSERT_EQUAL_UINT8(5, fm::trailerRoleCounter((5 << 2) | 3));
+}
+
+void test_phase_wrap_and_filters() {
+  TEST_ASSERT_EQUAL_INT64(-5000000, fm::wrapPhaseError(15000000, 20000000));
+  TEST_ASSERT_EQUAL_INT64(3000000, fm::wrapPhaseError(43000000, 20000000));
+  TEST_ASSERT_EQUAL_INT64(-3000000, fm::wrapPhaseError(-43000000, 20000000));
+  int64_t off = 0;
+  fm::syncingStep(off, 1000);
+  TEST_ASSERT_EQUAL_INT64(200, off);
+  int64_t to = 0, ot = 0;
+  float ic = 0;
+  for (int i = 0; i < 100000; i++) fm::syncedStep(to, ot, ic, 1000000, 20000000);
+  TEST_ASSERT_FLOAT_WITHIN(1.0f, 200000.0f, ic); // clamped to 1 % of the slot
+  TEST_ASSERT_FALSE(fm::syncLinkQualityOk(0.5f, 2));
+  TEST_ASSERT_TRUE(fm::syncLinkQualityOk(0.51f, 2));
+  TEST_ASSERT_FALSE(fm::syncLinkQualityOk(0.75f, 4));
+}
+
+// =========================================================================================== LqCounter
+
+void test_lq_counter() {
+  LqCounter lq;
+  int64_t t = 5000000000LL;
+  for (int i = 0; i < 25; i++) lq.onValid(t + i * 40000000LL);
+  const int64_t end = t + 24 * 40000000LL;
+  TEST_ASSERT_EQUAL_UINT8(100, lq.percent(end, 25));
+  TEST_ASSERT_EQUAL_UINT8(100, lq.percent(end, 20)); // clamped
+  TEST_ASSERT_EQUAL_UINT8(52, lq.percent(end + 500000000LL, 25)); // packets in the last 1 s: 13 of 25
+  TEST_ASSERT_EQUAL_UINT8(0, lq.percent(end + 1000000000LL, 25));
+  TEST_ASSERT_EQUAL_UINT8(0, lq.percent(end, 0));
+}
+
+// =========================================================================================== NetAirAccess
+
+struct AccessRig {
+  FakeClock clk;
+  NetAirAccess::Link link;
+  NetAirAccess acc;
+  CollectSink sink;
+  explicit AccessRig(bool master) : acc(link, clk, master, 25) { link.setSink(sink, 0); }
+};
+
+void test_rc_state_expiry_is_evaluated_at_slot_start() {
+  AccessRig r(true);
+  Frame rc = rcStateFrame(2, 1, 1);
+  uint8_t buf[253];
+  // queued at t0, slot starts at t0 + 99 ms: sent
+  TEST_ASSERT_TRUE(r.link.send(rc.d, rc.len, r.clk.nowNs()));
+  int64_t slot = r.clk.nowNs() + 99000000LL;
+  size_t n = r.acc.fillTxPayload(buf, sizeof buf, slot);
+  TEST_ASSERT_EQUAL_UINT32(253, n);
+  TEST_ASSERT_EQUAL_INT(1, countData(parseAir(buf, n), 0x10));
+  // queued at t0; built 97.5 ms later (inside the 2.5 ms wakeup lead) for a slot starting at t0 + 100 ms: NOT sent
+  r.clk.advanceMs(200);
+  TEST_ASSERT_TRUE(r.link.send(rc.d, rc.len, r.clk.nowNs()));
+  const int64_t t0 = r.clk.nowNs();
+  r.clk.t = t0 + 97500000LL;
+  n = r.acc.fillTxPayload(buf, sizeof buf, t0 + 100000000LL);
+  TEST_ASSERT_EQUAL_INT(0, countData(parseAir(buf, n), 0x10));
+  // and it is not released later either
+  r.clk.advanceMs(40);
+  n = r.acc.fillTxPayload(buf, sizeof buf, r.clk.nowNs());
+  TEST_ASSERT_EQUAL_INT(0, countData(parseAir(buf, n), 0x10));
+  TEST_ASSERT_TRUE(r.acc.localAirStats().framesExpired >= 1);
+}
+
+void test_priority_order_in_air_packet() {
+  AccessRig r(true);
+  const uint8_t pl[8] = {0};
+  Frame tel = makeData(2, 1, 0x30, 1, pl, 8, net::wire::Qos::Telemetry);
+  Frame ev = makeData(2, 1, 0x11, 1, pl, 8, net::wire::Qos::Event, false);
+  Frame lnk = makeData(2, 0xFF, 0x01, 1, pl, 8, net::wire::Qos::Link);
+  Frame rc = rcStateFrame(2, 1, 1);
+  const int64_t now = r.clk.nowNs();
+  r.link.send(tel.d, tel.len, now);
+  r.link.send(ev.d, ev.len, now);
+  r.link.send(lnk.d, lnk.len, now);
+  r.link.send(rc.d, rc.len, now);
+  uint8_t buf[253];
+  size_t n = r.acc.fillTxPayload(buf, sizeof buf, now);
+  auto f = parseAir(buf, n);
+  TEST_ASSERT_EQUAL_INT(4, (int)f.size());
+  TEST_ASSERT_EQUAL_UINT8(0x10, f[0].d[4]);
+  TEST_ASSERT_EQUAL_UINT8(0x01, f[1].d[4]);
+  TEST_ASSERT_EQUAL_UINT8(0x11, f[2].d[4]);
+  TEST_ASSERT_EQUAL_UINT8(0x30, f[3].d[4]);
+}
+
+void test_downlink_fill_throughput() {
+  // The RX module with a vehicle producing more telemetry than the air carries: 40 streams of 40-byte frames,
+  // refreshed every 40 ms. Each own TX slot (25 per second) must carry a full packet.
+  AccessRig r(false);
+  uint8_t pl[34];
+  memset(pl, 0x5A, sizeof pl);
+  uint32_t frameBytes = 0;
+  int64_t slot = r.clk.nowNs();
+  for (int s = 0; s < 25; s++) {
+    for (uint8_t k = 0; k < 40; k++) {
+      Frame f = makeData(1, 0, (uint8_t)(0x20 + k), (uint8_t)s, pl, sizeof pl, net::wire::Qos::Telemetry);
+      r.link.send(f.d, f.len, r.clk.nowNs());
+    }
+    uint8_t buf[253];
+    size_t n = r.acc.fillTxPayload(buf, sizeof buf, slot);
+    TEST_ASSERT_EQUAL_UINT32(253, n);
+    for (auto &f : parseAir(buf, n)) frameBytes += f.len;
+    r.clk.advanceMs(40);
+    slot = r.clk.nowNs();
+  }
+  char msg[80];
+  snprintf(msg, sizeof msg, "downlink frame bytes in 1 s: %u", (unsigned)frameBytes);
+  TEST_MESSAGE(msg);
+  TEST_ASSERT_TRUE(frameBytes >= 5000); // design / bench target: at least 5 kB/s of frames
+  TEST_ASSERT_TRUE(r.acc.localAirStats().queuePeak > 50);
+}
+
+void test_receive_mailbox_keepalive_and_lq() {
+  AccessRig master(true), slave(false);
+  slave.clk.t = master.clk.t;
+  Frame rc = rcStateFrame(2, 1, 9);
+  master.link.send(rc.d, rc.len, master.clk.nowNs());
+  slave.acc.setStatus(AirLinkStatus{Packets::AirState::kSynced, 12, 0, 0});
+  uint8_t buf[253];
+  for (int i = 0; i < 25; i++) {
+    size_t n = master.acc.fillTxPayload(buf, sizeof buf, master.clk.nowNs());
+    slave.acc.onRadioPacket(buf, n, slave.clk.nowNs(), -71, 7);
+    TEST_ASSERT_TRUE(slave.acc.process());
+    master.clk.advanceMs(40);
+    slave.clk.advanceMs(40);
+  }
+  TEST_ASSERT_EQUAL_INT(1, countData(slave.sink.got, 0x10, 2, 1));
+  // 40 ms after the last packet the first one is exactly 1 s old and out of the window: 24 of 25.
+  LocalAirStats s = slave.acc.localAirStats();
+  TEST_ASSERT_EQUAL_UINT8(96, s.rxLq);
+  TEST_ASSERT_EQUAL_INT8(-71, s.rssi);
+  TEST_ASSERT_EQUAL_INT8(7, s.snr);
+  TEST_ASSERT_EQUAL_INT8(12, s.txPower);
+  TEST_ASSERT_EQUAL_UINT32(25, s.airRxOk);
+  TEST_ASSERT_EQUAL_UINT8(25, slave.link.airStats().lastRxSfc); // the master counted 25 superframes
+  // An FHSS keep-alive (zero padding) is neither delivered nor counted as rejected.
+  uint8_t zeros[253] = {0};
+  slave.acc.onRadioPacket(zeros, sizeof zeros, slave.clk.nowNs(), -70, 7);
+  TEST_ASSERT_FALSE(slave.acc.process());
+  TEST_ASSERT_EQUAL_UINT32(1, slave.acc.counters.keepAlives);
+  TEST_ASSERT_EQUAL_UINT32(0, slave.acc.localAirStats().airRxBad);
+  // A corrupted packet is rejected and counted.
+  size_t n = master.acc.fillTxPayload(buf, sizeof buf, master.clk.nowNs());
+  buf[10] ^= 0x40;
+  slave.acc.onRadioPacket(buf, n, slave.clk.nowNs(), -70, 7);
+  TEST_ASSERT_FALSE(slave.acc.process());
+  TEST_ASSERT_EQUAL_UINT32(1, slave.acc.localAirStats().airRxBad);
+  // A second packet before process() overwrites the first (counted).
+  slave.acc.onRadioPacket(buf, n, slave.clk.nowNs(), -70, 7);
+  slave.acc.onRadioPacket(buf, n, slave.clk.nowNs(), -70, 7);
+  TEST_ASSERT_EQUAL_UINT32(1, slave.acc.counters.mailboxOverrun);
+  slave.acc.process();
+  // Searching: LQ is 0 at once.
+  slave.acc.setStatus(AirLinkStatus{Packets::AirState::kSearching, 12, 0, 0});
+  TEST_ASSERT_EQUAL_UINT8(0, slave.acc.localAirStats().rxLq);
+}
+
+void test_direction_master_does_not_accept_master() {
+  AccessRig a(true), b(true);
+  uint8_t buf[253];
+  size_t n = a.acc.fillTxPayload(buf, sizeof buf, a.clk.nowNs());
+  b.acc.onRadioPacket(buf, n, b.clk.nowNs(), -70, 7);
+  TEST_ASSERT_FALSE(b.acc.process());
+  TEST_ASSERT_EQUAL_UINT32(1, b.acc.localAirStats().airRxBad);
+}
+
+void test_access_no_heap_after_construction() {
+  AccessRig master(true), slave(false);
+  slave.sink.got.reserve(1000); // the test's own recorder
+  Frame rc = rcStateFrame(2, 1, 1);
+  uint8_t buf[253];
+  const unsigned long before = g_allocs.load();
+  for (int i = 0; i < 100; i++) {
+    master.link.send(rc.d, rc.len, master.clk.nowNs());
+    size_t n = master.acc.fillTxPayload(buf, sizeof buf, master.clk.nowNs());
+    slave.acc.onRadioPacket(buf, n, slave.clk.nowNs(), -70, 7);
+    slave.acc.process();
+    slave.acc.localAirStats();
+    master.clk.advanceMs(20);
+    slave.clk.advanceMs(20);
+  }
+  TEST_ASSERT_EQUAL_UINT32(0, (uint32_t)(g_allocs.load() - before));
+}
+
+// =========================================================================================== RxRouter
+
+struct RxRig {
+  FakeClock clk;
+  RecordLink uart{clk};
+  NetAirAccess::Link link;
+  NetAirAccess acc{link, clk, false, 25};
+  RxRouter router{clk, uart, link, acc};
+  /// One packet from the TX module carrying these frames, through the mailbox path.
+  void fromAir(std::initializer_list<Frame> frames) {
+    uint8_t buf[253];
+    net::wire::AirHeader h;
+    h.dirSlaveToMaster = false;
+    net::wire::AirPacketWriter w;
+    TEST_ASSERT_TRUE(w.begin(buf, sizeof buf, h));
+    for (auto &f : frames) TEST_ASSERT_TRUE(w.add(f.d, f.len));
+    size_t n = w.finish(253);
+    acc.onRadioPacket(buf, n, clk.nowNs(), -80, 3);
+    TEST_ASSERT_TRUE(acc.process());
+  }
+  std::vector<Frame> toAir() {
+    uint8_t buf[253];
+    size_t n = acc.fillTxPayload(buf, sizeof buf, clk.nowNs());
+    return parseAir(buf, n);
+  }
+};
+
+void test_rx_filters_from_air_to_uart() {
+  RxRig r;
+  r.uart.sent.clear();
+  const uint8_t pl[12] = {0};
+  r.fromAir({makeHeartbeat(0, 0),                                   // ground station heartbeat
+             rcStateFrame(0, 1, 1),                                 // ground station RC_STATE
+             makeData(0, 1, 0x11, 1, pl, 12, net::wire::Qos::Event, false), // ground station REQUEST
+             rcStateFrame(2, 1, 1),                                 // the Pocket's RC_STATE via the TX module
+             makeHeartbeat(2, 2)});                                 // TX module heartbeat
+  TEST_ASSERT_EQUAL_INT(0, countHb(r.uart.sent, 0));
+  TEST_ASSERT_EQUAL_INT(0, countData(r.uart.sent, 0x10, 0));
+  TEST_ASSERT_EQUAL_INT(0, countData(r.uart.sent, 0x11, 0));
+  TEST_ASSERT_EQUAL_INT(1, countData(r.uart.sent, 0x10, 2, 1));
+  TEST_ASSERT_EQUAL_INT(1, countHb(r.uart.sent, 2));
+  TEST_ASSERT_TRUE(r.router.node().stats.egressFiltered >= 3);
+}
+
+void test_rx_filters_from_uart_to_air() {
+  RxRig r;
+  const uint8_t pl[20] = {0};
+  r.uart.inject(makeData(1, 0, 0x20, 1, pl, 20));   // vehicle telemetry to the ground station
+  r.uart.inject(makeData(1, 0, 0x90, 1, pl, 20));   // USB-only port: never on air
+  r.uart.inject(makeHeartbeat(1, 1));
+  r.router.poll(); // own heartbeat (first poll) and LINK_STATS
+  auto air = r.toAir();
+  TEST_ASSERT_EQUAL_INT(1, countData(air, 0x20, 1, 0));
+  TEST_ASSERT_EQUAL_INT(0, countData(air, 0x90));
+  TEST_ASSERT_EQUAL_INT(1, countHb(air, 1));
+  TEST_ASSERT_EQUAL_INT(1, countHb(air, 3)); // own heartbeat
+  // nothing the module sends goes back to the vehicle addressed to node 0, nothing addressed to node 1 goes on air
+  for (auto &f : r.uart.sent) TEST_ASSERT_NOT_EQUAL(0, f.d[2]);
+  for (auto &f : air) TEST_ASSERT_NOT_EQUAL(1, f.d[2]);
+  TEST_ASSERT_TRUE(r.router.uartHostSeen());
+}
+
+void test_rx_link_stats_5hz_and_searching() {
+  RxRig r;
+  r.acc.setStatus(AirLinkStatus{Packets::AirState::kSearching, 12, 0, 0});
+  for (int i = 0; i < 100; i++) { // 1 s in 10 ms steps
+    r.router.poll();
+    r.clk.advanceMs(10);
+  }
+  int n = 0;
+  for (auto &f : r.uart.sent)
+    if (isData(f, 0x01) && f.d[3] == 3) {
+      Packets::LinkStats ls;
+      TEST_ASSERT_TRUE(ls.decode(f.d + 6, f.len - 6));
+      TEST_ASSERT_EQUAL_INT((int)Packets::AirState::kSearching, (int)ls.air_state);
+      TEST_ASSERT_EQUAL_UINT8(0, ls.rx_lq);
+      TEST_ASSERT_EQUAL_INT(12, ls.tx_power);
+      n++;
+    }
+  TEST_ASSERT_INT_WITHIN(1, 5, n);
+  TEST_ASSERT_EQUAL_INT(1, countHb(r.uart.sent, 3));
+  // no air: no RC state of any source is ever sent to the vehicle
+  TEST_ASSERT_EQUAL_INT(0, countData(r.uart.sent, 0x10));
+}
+
+void test_rx_router_no_heap_after_construction() {
+  RxRig r;
+  const uint8_t pl[20] = {0};
+  const Frame tel = makeData(1, 0, 0x20, 1, pl, 20);
+  const Frame rc = rcStateFrame(2, 1, 1);
+  uint8_t air[253];
+  // the TX module's packet, built once up front
+  net::wire::AirHeader h;
+  net::wire::AirPacketWriter w;
+  w.begin(air, sizeof air, h);
+  w.add(rc.d, rc.len);
+  const size_t an = w.finish(253);
+  r.uart.sent.clear(); // capacity stays reserved
+  const unsigned long before = g_allocs.load();
+  for (int i = 0; i < 200; i++) {
+    r.uart.inject(tel);
+    r.acc.onRadioPacket(air, an, r.clk.nowNs(), -70, 5);
+    r.acc.process();
+    r.router.poll();
+    uint8_t buf[253];
+    r.acc.fillTxPayload(buf, sizeof buf, r.clk.nowNs());
+    r.clk.advanceMs(20);
+  }
+  TEST_ASSERT_TRUE(r.uart.sent.size() < 8192); // the recorder never had to grow
+  TEST_ASSERT_EQUAL_UINT32(0, (uint32_t)(g_allocs.load() - before));
+}
+
+// =========================================================================================== triggers, power
+
+void test_upload_triggers() {
+  const int64_t boot = 1000000000LL;
+  using R = UploadTriggers::Reason;
+  {
+    UploadTriggers t(boot, true);
+    TEST_ASSERT_EQUAL_INT((int)R::None, (int)t.update(boot + 59000000000LL, false, true));
+    TEST_ASSERT_EQUAL_INT((int)R::SyncFailsafe, (int)t.update(boot + 60000000000LL, false, true));
+    TEST_ASSERT_EQUAL_INT((int)R::None, (int)t.update(boot + 61000000000LL, false, true)); // once
+  }
+  {
+    UploadTriggers t(boot, true);
+    t.update(boot + 1000000000LL, true, true); // synced once and host seen: both cancelled for good
+    TEST_ASSERT_EQUAL_INT((int)R::None, (int)t.update(boot + 600000000000LL, false, false));
+  }
+  {
+    UploadTriggers t(boot, true);
+    t.update(boot + 1000000000LL, true, false);
+    TEST_ASSERT_EQUAL_INT((int)R::UartStale, (int)t.update(boot + 60000000000LL, false, false));
+  }
+  {
+    UploadTriggers t(boot, false); // TX module: no UART trigger
+    t.update(boot + 1000000000LL, true, false);
+    TEST_ASSERT_EQUAL_INT((int)R::None, (int)t.update(boot + 600000000000LL, false, false));
+  }
+  {
+    UploadTriggers t(boot, true);
+    t.update(boot, true, true);
+    t.requestCommand();
+    TEST_ASSERT_EQUAL_INT((int)R::Command, (int)t.update(boot + 1, true, true));
+  }
+}
+
+void test_power_policy() {
+  NetPowerPolicy p;
+  TEST_ASSERT_FALSE(p.onRxSlotEnd(true, true));
+  TEST_ASSERT_FALSE(p.onRxSlotEnd(false, true));
+  TEST_ASSERT_TRUE(p.onRxSlotEnd(false, true)); // 2 lost in a row
+  TEST_ASSERT_FALSE(p.onRxSlotEnd(true, true));
+  TEST_ASSERT_TRUE(p.onRxSlotEnd(true, false)); // remote stats stale
+  TEST_ASSERT_TRUE(p.newRemoteStats(5));
+  TEST_ASSERT_FALSE(p.newRemoteStats(5));
+  TEST_ASSERT_TRUE(NetPowerPolicy::remoteFresh(true, 0, 999999999));
+  TEST_ASSERT_FALSE(NetPowerPolicy::remoteFresh(true, 0, 1000000000));
+  TEST_ASSERT_FALSE(NetPowerPolicy::remoteFresh(false, 0, 1));
+}
+
+// =========================================================================================== end to end
+
+struct Gate : LinkGateI {
+  bool open = true;
+  bool admits() override { return open; }
+};
+
+/// TX module (node 2) and RX module (node 3) joined by their air accesses over a simulated FHSS schedule: 20 ms
+/// slots, the master transmits in odd slots, the follower in even ones. Each packet arrives `toa` later. A loss
+/// window drops packets.
+struct EndToEnd {
+  FakeClock clk;
+  RecordLink usb{clk};
+  Gate gate;
+  NetAirAccess::Link txLink;
+  NetAirAccess txAcc{txLink, clk, true, 25};
+  NetworkRouter tx{clk, usb, &gate, txLink, txAcc};
+  RecordLink uart{clk};
+  NetAirAccess::Link rxLink;
+  NetAirAccess rxAcc{rxLink, clk, false, 25};
+  RxRouter rx{clk, uart, rxLink, rxAcc};
+  int64_t lossStart = 0, lossEnd = 0;
+  uint32_t slot = 0;
+  bool pocketOn = true;
+  uint32_t rcOnUart = 0;
+  int64_t lastRcOnUartNs = 0;
+
+  EndToEnd() {
+    txAcc.setStatus(AirLinkStatus{Packets::AirState::kSynced, 20, 0, 0});
+    rxAcc.setStatus(AirLinkStatus{Packets::AirState::kSynced, 12, 0, 0});
+  }
+
+  void step1ms() {
+    // CRSF frames from the Pocket at 250 Hz
+    if (pocketOn && (clk.t / 1000000LL) % 4 == 0) {
+      uint16_t ch[16];
+      for (int i = 0; i < 16; i++) ch[i] = 992;
+      tx.onCrsfRcFrame(ch);
+    }
+    if ((clk.t / 1000000LL) % 20 == 0) {
+      const bool masterSlot = (slot++ % 2) == 1;
+      NetAirAccess &from = masterSlot ? txAcc : rxAcc;
+      NetAirAccess &to = masterSlot ? rxAcc : txAcc;
+      uint8_t buf[253];
+      size_t n = from.fillTxPayload(buf, sizeof buf, clk.nowNs());
+      if (!(clk.t >= lossStart && clk.t < lossEnd)) {
+        to.onRadioPacket(buf, n, clk.nowNs(), -75, 6);
+      }
+    }
+    if ((clk.t / 1000000LL) % 20 == 11) { // after the 10.56 ms time on air
+      txAcc.process();
+      rxAcc.process();
+    }
+    tx.poll();
+    rx.poll();
+    const size_t before = uart.sent.size();
+    (void)before;
+    clk.advanceMs(1);
+  }
+  void run(int ms) {
+    for (int i = 0; i < ms; i++) {
+      const size_t n0 = uart.sent.size();
+      step1ms();
+      for (size_t k = n0; k < uart.sent.size(); k++)
+        if (isData(uart.sent[k], 0x10)) {
+          rcOnUart++;
+          lastRcOnUartNs = clk.nowNs();
+        }
+    }
+  }
+};
+
+void test_e2e_rc_state_reaches_uart_at_25hz() {
+  EndToEnd e;
+  e.run(1000);
+  const uint32_t rc0 = e.rcOnUart;
+  e.run(2000);
+  const uint32_t rc = e.rcOnUart - rc0;
+  char msg[60];
+  snprintf(msg, sizeof msg, "RC_STATE on the RX UART in 2 s: %u", (unsigned)rc);
+  TEST_MESSAGE(msg);
+  TEST_ASSERT_UINT32_WITHIN(1, 50, rc); // 25 Hz: one per uplink slot
+  TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x10, -1, 0));     // never the ground-station copy
+  TEST_ASSERT_TRUE(countData(e.uart.sent, 0x10, 2, 1) > 0);
+  // LINK_STATS of node 3 reaches the TX module (and the ground station on USB)
+  TEST_ASSERT_TRUE(e.tx.linkStatsPort().hasValue());
+  TEST_ASSERT_TRUE(countData(e.usb.sent, 0x01, 3) > 0);
+  TEST_ASSERT_TRUE(e.tx.node().isPresent(3));
+  TEST_ASSERT_TRUE(e.rx.node().isPresent(2));
+}
+
+void test_e2e_ground_station_never_reaches_uart() {
+  EndToEnd e;
+  const uint8_t pl[12] = {0};
+  for (int i = 0; i < 100; i++) {
+    e.usb.inject(makeHeartbeat(0, 0));                 // ground-station heartbeat
+    e.usb.inject(rcStateFrame(0, 1, (uint8_t)i));      // virtual radio RC_STATE
+    e.usb.inject(rcStateFrame(1, 1, (uint8_t)i));      // RC_STATE injected over USB with a forged source
+    e.usb.inject(makeData(0, 1, 0x11, (uint8_t)i, pl, 12, net::wire::Qos::Event, false));
+    e.run(20);
+  }
+  TEST_ASSERT_EQUAL_INT(0, countHb(e.uart.sent, 0));
+  TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x10, 0));
+  TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x10, 1));
+  TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x11, 0));
+  TEST_ASSERT_TRUE(countData(e.uart.sent, 0x10, 2) > 0); // the Pocket's state still flows
+}
+
+void test_e2e_pocket_off_silence_and_no_late_release() {
+  EndToEnd e;
+  e.run(1000);
+  e.pocketOn = false;
+  const int64_t off = e.clk.nowNs();
+  e.run(1000);
+  // The last RC_STATE on the UART was originated before the Pocket stopped; it arrives at most one uplink slot plus
+  // the expiry limit later.
+  TEST_ASSERT_TRUE(e.lastRcOnUartNs - off <= 100000000LL + 40000000LL);
+  // RF block of 5 s with the Pocket on: nothing old is released afterwards.
+  e.pocketOn = true;
+  e.run(500);
+  e.lossStart = e.clk.t;
+  e.lossEnd = e.clk.t + 5000000000LL;
+  e.run(5000);
+  const uint32_t rcAtEnd = e.rcOnUart;
+  e.run(60);
+  TEST_ASSERT_TRUE(e.rcOnUart - rcAtEnd <= 2); // only fresh states, one per uplink slot
+}
+
+void setUp() {}
+void tearDown() {}
+
+int main(int, char **) {
+  UNITY_BEGIN();
+  RUN_TEST(test_time_on_air_profile_v1);
+  RUN_TEST(test_slot_budget);
+  RUN_TEST(test_expected_rates);
+  RUN_TEST(test_slot_roles_one_to_one);
+  RUN_TEST(test_trailer_counters_and_seeds);
+  RUN_TEST(test_phase_wrap_and_filters);
+  RUN_TEST(test_lq_counter);
+  RUN_TEST(test_rc_state_expiry_is_evaluated_at_slot_start);
+  RUN_TEST(test_priority_order_in_air_packet);
+  RUN_TEST(test_downlink_fill_throughput);
+  RUN_TEST(test_receive_mailbox_keepalive_and_lq);
+  RUN_TEST(test_direction_master_does_not_accept_master);
+  RUN_TEST(test_access_no_heap_after_construction);
+  RUN_TEST(test_rx_filters_from_air_to_uart);
+  RUN_TEST(test_rx_filters_from_uart_to_air);
+  RUN_TEST(test_rx_link_stats_5hz_and_searching);
+  RUN_TEST(test_rx_router_no_heap_after_construction);
+  RUN_TEST(test_upload_triggers);
+  RUN_TEST(test_power_policy);
+  RUN_TEST(test_e2e_rc_state_reaches_uart_at_25hz);
+  RUN_TEST(test_e2e_ground_station_never_reaches_uart);
+  RUN_TEST(test_e2e_pocket_off_silence_and_no_late_release);
+  return UNITY_END();
+}

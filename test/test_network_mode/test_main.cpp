@@ -60,6 +60,15 @@ struct RecordLink : net::FrameLinkI {
   }
 };
 
+/// The air face of the TX module as the target builds it: AirFrameLink plus the FHSS air access (master). The tests
+/// play the radio: drainAir() is one own TX slot, injectFromAir() one received packet.
+struct AirSide {
+  NetAirAccess::Link link;
+  NetAirAccess access;
+  NetAirAccess &stats;
+  explicit AirSide(net::TimeSourceI &t) : access(link, t, true, 25), stats(access) {}
+};
+
 struct Gate : LinkGateI {
   bool open = true;
   bool admits() override { return open; }
@@ -187,7 +196,7 @@ static void injectFromAir(AirSide &air, FakeClock &clk, const Frame &f) {
 struct Rig {
   FakeClock clk;
   RecordLink usb{clk};
-  AirSide air;
+  AirSide air{clk};
   Gate gate;
   NetworkRouter router;
   Rig() : router(clk, usb, &gate, air.link, air.stats) {}
@@ -463,13 +472,19 @@ void test_filter_rc_state_from_usb_not_forwarded_to_air() {
   TEST_ASSERT_EQUAL_INT(0, a.count(0x10)); // not on the radio path
   TEST_ASSERT_TRUE(r.router.node().stats.egressFiltered >= 1);
 
-  // Control: other traffic from the ground station is forwarded (REQUEST, port 0x11).
+  // Since the air link task: no ground-station traffic crosses the radio towards the vehicle at all (source drop
+  // of node 0), so a REQUEST from the ground station is not forwarded either.
   Packets::Request req;
   req.req_id = 5;
   Frame g = makePacket(0, 1, 1, req, net::wire::Qos::Event, false);
   r.usb.inject(g.d, g.len);
   AirContents b = drainAir(r.air, r.clk.nowNs());
-  TEST_ASSERT_EQUAL_INT(1, b.count(0x11, 1, 0));
+  TEST_ASSERT_EQUAL_INT(0, b.count(0x11, 1, 0));
+  // RC_STATE arriving over USB on behalf of another source is still dropped by the port rule (second layer).
+  Frame h = makePacket(1, 1, 8, rc, net::wire::Qos::Control);
+  r.usb.inject(h.d, h.len);
+  AirContents c = drainAir(r.air, r.clk.nowNs());
+  TEST_ASSERT_EQUAL_INT(0, c.count(0x10));
 }
 
 void test_filter_usb_only_ports_not_on_air_but_on_usb() {
@@ -793,18 +808,41 @@ void test_no_heap_use_after_construction() {
   TEST_ASSERT_EQUAL_UINT32(0, (uint32_t)(g_allocs.load() - before));
 }
 
-void test_stub_access_drains_on_slot_period() {
+void test_filter_no_ground_station_traffic_on_air() {
   Rig r;
-  uint16_t ch[16];
-  rawChannels(ch, 1000);
-  r.router.onCrsfRcFrame(ch);
-  r.air.access.poll(r.clk.nowNs() + 1);       // first slot
-  r.clk.advanceMs(10);
-  r.air.access.poll(r.clk.nowNs());           // not yet: 20 ms period
-  TEST_ASSERT_EQUAL_UINT32(1, r.air.access.discardedPackets());
-  r.clk.advanceMs(15);
-  r.air.access.poll(r.clk.nowNs());
-  TEST_ASSERT_EQUAL_UINT32(2, r.air.access.discardedPackets());
+  // A ground-station REQUEST to the vehicle, and a GS frame on another port: neither goes on the air.
+  const uint8_t pl[12] = {1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  Frame req = makeData(0, 1, 0x11, 1, pl, sizeof pl, net::wire::Qos::Event, false);
+  r.usb.inject(req.d, req.len);
+  Frame other = makeData(0, 0xFF, 0x30, 1, pl, 4);
+  r.usb.inject(other.d, other.len);
+  // A frame injected over USB on behalf of the vehicle (src 1) still passes (bench test 8).
+  Frame veh = makeData(1, 2, 0x30, 1, pl, 4);
+  r.usb.inject(veh.d, veh.len);
+  AirContents a = drainAir(r.air, r.clk.nowNs());
+  TEST_ASSERT_EQUAL_INT(0, a.count(0x11));
+  TEST_ASSERT_EQUAL_INT(0, a.count(0x30, 0xFF));
+}
+
+void test_tx_link_stats_carry_air_access_counters() {
+  Rig r;
+  r.air.access.setStatus(AirLinkStatus{Packets::AirState::kSynced, 20, 1, 0});
+  Frame f = makeHeartbeat(3, 3);
+  injectFromAir(r.air, r.clk, f); // one packet straight into the link (not via the mailbox: no LQ)
+  r.router.poll();
+  // LINK_STATS from node 2 on USB: air state synced, tx power 20, antenna rx 1, 1 packet accepted.
+  bool found = false;
+  for (auto &it : r.usb.sent)
+    if (isData(it.d, it.len, 0x01) && it.d[3] == 2) {
+      Packets::LinkStats ls;
+      TEST_ASSERT_TRUE(ls.decode(it.d + 6, it.len - 6));
+      TEST_ASSERT_EQUAL_INT((int)Packets::AirState::kSynced, (int)ls.air_state);
+      TEST_ASSERT_EQUAL_INT(20, ls.tx_power);
+      TEST_ASSERT_EQUAL_UINT8(0x01, ls.antenna);
+      TEST_ASSERT_EQUAL_UINT16(1, ls.air_rx_ok);
+      found = true;
+    }
+  TEST_ASSERT_TRUE(found);
 }
 
 void setUp() {}
@@ -844,6 +882,7 @@ int main() {
   RUN_TEST(test_router_stale_vehicle_telemetry_not_shown);
   RUN_TEST(test_log_text_goes_to_usb_not_air);
   RUN_TEST(test_no_heap_use_after_construction);
-  RUN_TEST(test_stub_access_drains_on_slot_period);
+  RUN_TEST(test_filter_no_ground_station_traffic_on_air);
+  RUN_TEST(test_tx_link_stats_carry_air_access_counters);
   return UNITY_END();
 }

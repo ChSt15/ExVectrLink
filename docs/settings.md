@@ -2,7 +2,7 @@
 
 > What the firmware keeps across power cycles, and how to add to it.
 
-Last verified against commit: 4830874 (submodule ExVectrData 283596f)
+Last verified against commit: 4830874 (submodule ExVectrData 283596f). Network-mode note added at 35fafb1 + `feature/air-link-fhss`.
 
 ## What is persisted
 
@@ -14,6 +14,8 @@ Last verified against commit: 4830874 (submodule ExVectrData 283596f)
 | | | `txAntenna` | 255 = diversity | Lua "TX Antenna" | both sides. An index the build has no radio for falls back to diversity (`src/RFSetup.cpp:81-88`). |
 
 On the RX side the power fields are stored but ignored: the receiver always runs at a fixed 20 dBm (`src/RFSetup.cpp:72-79`).
+
+**Network mode** (`exvectrlink_tx_module_network`) reads the same `RFSettings` record at boot (dynamic power limits and enable, TX antenna) and applies it to the network air link. It never writes it (no Lua menu there): change the values in FPV mode. The network receiver firmwares use no settings (fixed power, no EEPROM). No new record was added; the air profile is compiled in (`kNetworkProfileV1`).
 
 **Not persisted**, so these reset at every boot:
 - FHSS hop key (always 0; nothing sets it now)

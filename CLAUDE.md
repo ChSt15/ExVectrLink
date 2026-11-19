@@ -10,7 +10,7 @@ The link library itself is the `lib/ExVectrLink` submodule. Packet formats are i
 
 Part of the ExVectrStarship workspace (`../CLAUDE.md`). This file and `docs/` are enough to work on ExVectrLink on its own.
 
-**Status:** `feature/tx-network-router` adds a separately compiled TX-module env `exvectrlink_tx_module_network` (ExVectrNetwork node 2 router, USB side, air stub), see [docs/network-mode.md](docs/network-mode.md). The FPV envs are unchanged. Open: the FHSS air link for that mode and the runtime mode switch.
+**Status:** network mode exists as separate firmwares (see [docs/network-mode.md](docs/network-mode.md)): `exvectrlink_tx_module_network` (node 2 router: USB, CRSF, FHSS air link) and `exvectrlink_rx_network_esp8285` / `_genericdiversity` (node 3 router: UART to the vehicle, FHSS air link), on the FHSS with air profile v1 (`feature/air-link-fhss`). FHSS parameters are runtime settings whose defaults are the FPV values; FPV is bit-for-bit unchanged (golden-trace test). Open: the runtime mode switch on the TX module (Lua "Mode") and the network upload command.
 
 **Read [docs/README.md](docs/README.md) first.** It indexes how the firmware works: air protocol, CRSF, targets, known issues. Don't re-derive these from scratch.
 
@@ -42,7 +42,9 @@ The PlatformIO binary on this machine is `~/.platformio/penv/bin/pio`. Run it fr
 ~/.platformio/penv/bin/pio run -e exvectrlink_tx_module_diversity      # TX module (Pocket), 2 radios
 ~/.platformio/penv/bin/pio run -e exvectrlink_tx_module                # TX module, 1 radio
 ~/.platformio/penv/bin/pio run -e exvectrlink_tx_module_network        # TX module, ExVectrNetwork mode (separate firmware, no FPV code)
+~/.platformio/penv/bin/pio run -e exvectrlink_rx_network_esp8285       # RX, ESP8285, ExVectrNetwork mode (UART 460800 to the vehicle)
 ~/.platformio/penv/bin/pio test -e native                              # host tests of src_network/
+~/.platformio/penv/bin/pio test -e native_fhss                         # host tests of the real FHSS, incl. the FPV golden trace
 ~/.platformio/penv/bin/pio run -e exvectrlink_genericdiversity_lr_ota  # RX, ESP32 + 2 radios, CRSF out
 ~/.platformio/penv/bin/pio run -e exvectrlink_generic_esp8285_ota      # RX, ESP8285, CRSF out
 ```

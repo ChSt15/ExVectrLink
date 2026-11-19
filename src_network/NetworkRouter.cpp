@@ -19,29 +19,39 @@ network::NodeConfig NetworkRouter::makeConfig() {
 NetworkRouter::NetworkRouter(network::TimeSourceI &time, network::FrameLinkI &usb,
                              LinkGateI *usbGate, network::FrameLinkI &air,
                              AirStatsSourceI &airStats)
-    : time_(time), airStats_(airStats), airRaw_(air), usbGuard_(usb, usbGate),
-      airGuard_(air, nullptr), node_(makeConfig(), time),
+    : time_(time), airStats_(airStats), usbGuard_(usb, usbGate), node_(makeConfig(), time),
       linkStatsPort_(mux_, Packets::LinkStats::kPort, kRxModule),
       handsetTelemPort_(mux_, Packets::HandsetTelem::kPort, kVehicle),
       startNs_(time.nowNs()), nextLinkStatsNs_(startNs_) {
   node_.setDataSink(mux_);
 
-  // Where frames must not go (design 3.3.3 and the Revision 1 heartbeat rule):
-  //  - USB: everything may go to the ground station, except the copies addressed to the vehicle.
-  //  - Air: nothing addressed to the ground station (it is never on the radio side), no USB-only ports (>= 0x80),
-  //    no RC_STATE that came from USB (the ground station's virtual radio never reaches the vehicle) and no
-  //    heartbeat of node 0 (the vehicle must never see the ground station over radio).
-  usbGuard_.addDropDst(kVehicle);
-  airGuard_.addDropDst(kGroundStation);
-
-  EgressFilter usbFilter; // default: admit everything
+  // Where frames must not go (design 3.3.3, the Revision 1 heartbeat rule, docs/network-mode.md "Filters"):
+  //  - USB: everything may go to the ground station, except the copies addressed to the vehicle (Node::send floods
+  //    a unicast frame to every link while it has no route).
+  //  - Air: no ground-station traffic at all (source node 0: its heartbeats, its RC_STATE and everything else; the
+  //    vehicle never sees the ground station over radio), nothing addressed to the ground station, no USB-only
+  //    ports (>= 0x80), and no RC_STATE that came in over USB whatever its source (the ground station's virtual
+  //    radio never reaches the vehicle).
+  EgressFilter usbFilter;
+  usbFilter.addDstDrop(kVehicle);
   usbIdx_ = node_.addLink(usbGuard_, usbFilter);
 
   EgressFilter airFilter;
   airFilter.portLimit = 0x80;
+  airFilter.addSrcDrop(kGroundStation);
+  airFilter.addDstDrop(kGroundStation);
   if (usbIdx_ >= 0) airFilter.addRule(static_cast<uint8_t>(usbIdx_), kRcStatePort);
-  airFilter.addHeartbeatDrop(kGroundStation);
-  airIdx_ = node_.addLink(airGuard_, airFilter);
+  airFilter.addHeartbeatDrop(kGroundStation); // covered by the source drop; kept as a second, explicit rule
+  airIdx_ = node_.addLink(air, airFilter);
+
+  // Fixed topology: the vehicle and the RX module are always behind the air link, the ground station behind USB.
+  // Pinned routes keep a frame with a forged source (for example a bench injection with src 1 over USB) from
+  // diverting the Pocket's RC_STATE away from the air link.
+  if (airIdx_ >= 0) {
+    node_.pinRoute(kVehicle, static_cast<uint8_t>(airIdx_));
+    node_.pinRoute(kRxModule, static_cast<uint8_t>(airIdx_));
+  }
+  if (usbIdx_ >= 0) node_.pinRoute(kGroundStation, static_cast<uint8_t>(usbIdx_));
 }
 
 void NetworkRouter::poll() {
@@ -55,20 +65,8 @@ void NetworkRouter::poll() {
 }
 
 void NetworkRouter::sendOwnLinkStats(int64_t now) {
-  const LocalAirStats local = airStats_.localAirStats();
-  Packets::LinkStats ls;
-  ls.uptime = static_cast<double>(now - startNs_) * 1e-9;
-  ls.air_state = local.airState;
-  ls.rx_lq = local.rxLq;
-  ls.rssi = local.rssi;
-  ls.snr = local.snr;
-  ls.tx_power = local.txPower;
-  ls.antenna = 0;
-  ls.air_rx_ok = static_cast<uint16_t>(airRaw_.stats.rxOk);
-  ls.air_rx_bad = static_cast<uint16_t>(airRaw_.stats.rxBad);
-  ls.frames_dropped = static_cast<uint16_t>(airRaw_.stats.txDropped);
-  ls.frames_expired = 0;
-  ls.queue_peak = 0;
+  const Packets::LinkStats ls =
+      makeLinkStats(airStats_.localAirStats(), static_cast<double>(now - startNs_) * 1e-9);
   uint8_t buf[Packets::LinkStats::kMaxSize];
   const size_t n = ls.encode(buf, sizeof buf);
   if (n) node_.send(network::kBroadcastAddr, Packets::LinkStats::kPort, buf, n, Qos::Link, true);

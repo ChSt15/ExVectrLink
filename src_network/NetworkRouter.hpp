@@ -2,7 +2,8 @@
 // TX-module router application for ExVectrNetwork mode: node 2, role link TX module, forwarding = true.
 // Host-testable: no Arduino, no ExVectrCore, no heap after construction (docs/network-mode.md).
 //
-// Links: USB (towards the ground station, node 0) and the air side (towards the vehicle receiver; today a stub).
+// Links: USB (towards the ground station, node 0) and the air side (AirFrameLink on the FHSS slots, towards the
+// vehicle receiver).
 // The CRSF half-duplex port is not a network link: this class turns CRSF RC frames into RC_STATE and builds the
 // telemetry frames for the handset.
 #include <stdint.h>
@@ -10,8 +11,8 @@
 #include "ExVectrNetwork.hpp"
 #include "ExVectrNetwork/TimeSourceI.hpp"
 
-#include "AirStub.hpp"
 #include "LinkGuard.hpp"
+#include "NetAirAccess.hpp"
 #include "NetCrsf.hpp"
 
 namespace VCTR::ExVectrLink::netmode {
@@ -72,7 +73,7 @@ public:
   } stats;
 
   /// `usb` and `air` are the raw datalinks. `usbGate` (optional) refuses frames while the host is absent or the
-  /// stream is backed up. `airStats` reports the module's own radio (stub: zeros).
+  /// stream is backed up. `airStats` reports the module's own radio.
   NetworkRouter(network::TimeSourceI &time, network::FrameLinkI &usb, LinkGateI *usbGate,
                 network::FrameLinkI &air, AirStatsSourceI &airStats);
 
@@ -99,7 +100,6 @@ public:
   int usbLinkIndex() const { return usbIdx_; }
   int airLinkIndex() const { return airIdx_; }
   const LinkGuard &usbGuard() const { return usbGuard_; }
-  const LinkGuard &airGuard() const { return airGuard_; }
   const SourcePort<Packets::LinkStats> &linkStatsPort() const { return linkStatsPort_; }
   const SourcePort<Packets::HandsetTelem> &handsetTelemPort() const { return handsetTelemPort_; }
 
@@ -109,9 +109,7 @@ private:
 
   network::TimeSourceI &time_;
   AirStatsSourceI &airStats_;
-  network::FrameLinkI &airRaw_;
   LinkGuard usbGuard_;
-  LinkGuard airGuard_;
   network::Node node_;
   network::PortMux<8> mux_;
   SourcePort<Packets::LinkStats> linkStatsPort_;     // accepted from node 3 only

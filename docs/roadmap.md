@@ -2,7 +2,7 @@
 
 > User decisions about where ExVectrLink is going. **Nothing here is implemented yet.** These are design notes, recording which existing code each item would touch. Anything that turns out different during implementation must be agreed with the user first, and then recorded here.
 
-Last verified against commit: fb04cb8 + feature/tx-network-router (section 2 only; the rest is as of 4830874)
+Last verified against commit: 35fafb1 + feature/air-link-fhss (section 2 only; the rest is as of 4830874)
 
 ## Guiding principles
 
@@ -54,7 +54,9 @@ Selectable in the handset Lua menu, stored in EEPROM, applied to **both** ends o
 
 ## 2. TX-module USB bridge
 
-> **Status (feature/tx-network-router): USB side done, air side open.** A separate firmware env `exvectrlink_tx_module_network` runs the ExVectrNetwork router (node 2) with the USB `StreamFrameLink`, the CRSF <-> `RC_STATE`/telemetry translation, the egress filters and an air stub. Details: [network-mode.md](network-mode.md). Still open: the FHSS air link behind the `AirAccessI` seam (including the decisions about WiFi upload, sync failsafe and test commands in that mode), the runtime FPV/network mode switch (Lua, reboot on change, item 1), and the vehicle-side receiver env. The text below is the original plan; where it says the host protocol must be designed, the design is now the ExVectrNetwork stream frame.
+> **Status (feature/air-link-fhss): USB side and air link done, as separate firmwares.** The TX module firmware now runs the FHSS air link (air profile v1: SF5/BW1600/CR4/5, 255-byte frames, 20 ms slots, 1:1) and the vehicle receiver has its own network-mode firmware (`exvectrlink_rx_network_esp8285`, `_genericdiversity`: node 3 router, UART 460800 to the vehicle). FHSS slot interval, role ratio, frame length and link version are runtime parameters (`AirProfile`); FPV keeps its defaults bit for bit. Still open: the runtime FPV/network switch on the TX module (Lua "Mode", item 1, task T6c), the network upload command, a downlink-heavy slot ratio. Details: [network-mode.md](network-mode.md).
+>
+> Earlier status (feature/tx-network-router): USB side done, air side open. A separate firmware env `exvectrlink_tx_module_network` runs the ExVectrNetwork router (node 2) with the USB `StreamFrameLink`, the CRSF <-> `RC_STATE`/telemetry translation, the egress filters and an air stub. Details: [network-mode.md](network-mode.md). Still open: the FHSS air link behind the `AirAccessI` seam (including the decisions about WiFi upload, sync failsafe and test commands in that mode), the runtime FPV/network mode switch (Lua, reboot on change, item 1), and the vehicle-side receiver env. The text below is the original plan; where it says the host protocol must be designed, the design is now the ExVectrNetwork stream frame.
 
 Forward ExVectrNetwork data frames both ways between the TX module's native USB (ESP32-S3 CDC) and the air link, next to the existing CRSF relay. The ground station connects here during flight tests.
 

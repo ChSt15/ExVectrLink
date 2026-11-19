@@ -62,6 +62,13 @@ struct LocalAirStats {
   int8_t rssi = 0;    ///< dBm of the last valid downlink packet
   int8_t snr = 0;     ///< dB
   int8_t txPower = 0; ///< dBm
+  // LINK_STATS only (not used by the CRSF frames):
+  uint8_t antenna = 0;       ///< bits 3-0 RX winner, bits 7-4 TX antenna
+  uint32_t airRxOk = 0;      ///< air packets accepted (cumulative)
+  uint32_t airRxBad = 0;     ///< air packets rejected: CRC-32, version, direction, NETID (cumulative)
+  uint32_t framesDropped = 0; ///< frames lost in the aggregator: queue full, evicted, invalid (cumulative)
+  uint32_t framesExpired = 0; ///< frames expired in the aggregator (cumulative)
+  uint8_t queuePeak = 0;     ///< %, peak aggregator fill over the last 1 to 2 s
 };
 
 /// CRSF power index (0, 10, 25, 50, 100, 250, 500, 1000, 2000 mW) for a dBm value, as in CRSFRcInput.

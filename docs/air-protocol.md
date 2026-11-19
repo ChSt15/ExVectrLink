@@ -2,7 +2,9 @@
 
 > How the two ends talk over 2.4 GHz: timing, hopping, framing, packet types, and the services built on top of them.
 
-Last verified against commit: 4830874 (submodules: ExVectrLink 37ab8e2, ExVectrNetwork 7cb0e79, ExVectrPackets 46286bd)
+Last verified against commit: 4830874 (submodules: ExVectrLink 37ab8e2, ExVectrNetwork 7cb0e79, ExVectrPackets 46286bd). FHSS sections and the "Network mode" section re-verified against 35fafb1 + `feature/air-link-fhss` (ExVectrLink `feature/air-link-fhss`).
+
+**FPV is unchanged by network mode.** `feature/air-link-fhss` made FHSS parameters runtime-settable, but the defaults are exactly the values below and the FPV firmware never changes them. The host test `test/test_fhss` (`pio test -e native_fhss`) checks that the FPV air traffic of both ends (bytes, channels, slot timing) is bit-for-bit identical to the unmodified FHSS. `OTA_VERSION` is still 2.
 
 ## Layers
 
@@ -41,10 +43,14 @@ So the link always runs SF7/BW800/CR4/8. Those are the radio parameters of "Medi
 
 | Parameter | Value | Source | Set anywhere? |
 |---|---|---|---|
-| Slot interval | 10 ms | `FHSS.hpp:208` | No setter is called. |
-| Slots per hop | 4 (40 ms per channel) | `FHSS.hpp:210` | No. The setter caps at 16, but the trailer only carries 2 bits. |
-| Role-reversal period `numTxPacketsToRx` | 15 slots | `FHSS.hpp:217` | No. `setRxSlotIndex()` would cap it at 4 (`FHSS.cpp:54-61`). |
-| Hop key | 0 | `FHSS.hpp:226` | No. The serial `StartFHSS` packet that used to set it was removed. |
+| Slot interval | 10 ms | `FHSS.hpp` member default | Not in FPV. Network mode: `applyProfile()`. |
+| Slots per hop | 4 (40 ms per channel) | `FHSS.hpp` | Not in FPV. The setter now clamps to 1..4 (the trailer carries 2 bits). |
+| Role-reversal period `numTxPacketsToRx` | 15 slots | `FHSS.hpp` | Not in FPV. `setRxSlotIndex()` now clamps to 2..64 (6-bit trailer field; it used to cap at 4, below the default). |
+| Hop key | 0 | `FHSS.hpp` | Not in FPV. The serial `StartFHSS` packet that used to set it was removed. Network mode uses 0x37. |
+| Link version (trailer seed) | 2 (`OTA_VERSION`) | `FHSS.hpp` | Not in FPV. Network mode: 0x11. |
+| Fixed frame length | 0 (variable, up to 9 bytes payload) | `FHSS.hpp` | Not in FPV. Network mode: 255. |
+| Wakeup lead | 1 ms | `FHSS.hpp` | Not in FPV. Network mode: 2.5 ms. |
+| TX payload provider | none (push mode, `transmitDataframe()`) | `FHSS.hpp` | Not in FPV. Network mode: pull mode, see network-mode.md. |
 | Sync latency compensation | 900 µs | `FHSS.hpp:213` | Lua "Sync Offset ±100us" → OTA `SetSyncOffset`, not persisted |
 
 - **Slots.** Each slot is one TX or one RX operation. `roleReverseCounter` counts 0…14.
@@ -76,6 +82,8 @@ So the link always runs SF7/BW800/CR4/8. Those are the radio parameters of "Medi
 - **Counter resync:** if a packet that passes all checks carries a different role counter, the RX re-snaps its counters as soon as two consecutive packets agree on the same shift. After more than 10 mismatches it drops to `Syncing` (`FHSS.cpp:350-382`).
 - **Sync timestamp:** the RX_DONE time from the DIO1 ISR, minus the sync latency compensation (`FHSS.cpp:190`).
 - **Link quality** (`getLinkQuality()`): the fraction of the last 100 RX slots that received a valid frame, with or without payload (`FHSS.cpp:530-545`, `FHSS.cpp:616-619`).
+
+The schedule, trailer and sync maths are pure functions in `lib/ExVectrLink/include/ExVectrLink/datalink/FhssMath.hpp`, used by `FHSS.cpp` and host-tested; the parameter sets are in `AirProfile.hpp` (`kFpvProfile` = the defaults above, `kNetworkProfileV1`).
 
 ## OTA frame
 
@@ -235,3 +243,14 @@ The only exit is a reset.
 - On the TX side, `Searching` means no packet from an RX in the last second. So a TX module, or a vehicle RX, powered for 60 s without its partner also ends up in upload mode.
 
 This is meant as a recovery path for bad firmware or configuration. Its operational impact is listed in known-issues.md.
+
+## Network mode (ExVectrNetwork firmwares)
+
+The network-mode firmwares (`exvectrlink_tx_module_network`, `exvectrlink_rx_network_*`) use the same FHSS engine with **air profile v1** and carry ExVectrNetwork air packets instead of the OTA application layer above. Full description: [network-mode.md](network-mode.md) "Air link". In short:
+
+- LoRa SF5 / BW1600 / CR 4/5, 12-symbol preamble, CRC on, implicit header (driver Fixed mode), **255 bytes on air** (10.56 ms) in every frame.
+- FHSS: 20 ms slots, role period 2 (1:1, 25 packets/s each way), 2 slots per hop (40 ms superframe), wakeup lead 2.5 ms, link version 0x11, hop key 0x37.
+- Frame: a 253-byte ExVectrNetwork air packet (design 4.6, own CRC-32) plus the unchanged 2-byte FHSS trailer.
+- TX slots are filled in pull mode (`FHSS::setTxPayloadProvider()`), right before transmission.
+- None of the OTA packet types, `LinkTelemetry`, RC mux packets or the over-the-air test commands exist in network mode. Link statistics are ExVectrNetwork `LINK_STATS` packets.
+- FPV and network units cannot exchange frames: different modulation and length, and different trailer checksum seeds.
