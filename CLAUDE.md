@@ -10,7 +10,7 @@ The link library itself is the `lib/ExVectrLink` submodule. Packet formats are i
 
 Part of the ExVectrStarship workspace (`../CLAUDE.md`). This file and `docs/` are enough to work on ExVectrLink on its own.
 
-**Status:** network mode exists as separate firmwares (see [docs/network-mode.md](docs/network-mode.md)): `exvectrlink_tx_module_network` (node 2 router: USB, CRSF, FHSS air link) and `exvectrlink_rx_network_esp8285` / `_genericdiversity` (node 3 router: UART to the vehicle, FHSS air link), on the FHSS with air profile v1 (`feature/air-link-fhss`). FHSS parameters are runtime settings whose defaults are the FPV values; FPV is bit-for-bit unchanged (golden-trace test). Open: the runtime mode switch on the TX module (Lua "Mode") and the network upload command.
+**Status:** network mode exists as separate firmwares (see [docs/network-mode.md](docs/network-mode.md)): `exvectrlink_tx_module_network` (node 2 router: USB, CRSF, FHSS air link) and `exvectrlink_rx_network_esp8285` / `_genericdiversity` (node 3 router: UART to the vehicle, FHSS air link), on the FHSS with air profile v1 (`feature/air-link-fhss`). FHSS parameters are runtime settings whose defaults are the FPV values; FPV is bit-for-bit unchanged (golden-trace test). Ground-station traffic over radio: only its heartbeat and RC_STATE are dropped, REQUESTs pass. The link upload command (REQUEST action 10, target = module id) is always honoured by both modules (`feature/gs-requests-and-upload`). Open: the runtime mode switch on the TX module (Lua "Mode") and the senders of the upload command.
 
 **Read [docs/README.md](docs/README.md) first.** It indexes how the firmware works: air protocol, CRSF, targets, known issues. Don't re-derive these from scratch.
 

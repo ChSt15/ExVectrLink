@@ -2,7 +2,7 @@
 
 > What lives where, and how the pieces run together.
 
-Last verified against commit: 35fafb1 + feature/air-link-fhss (submodules: ExVectrLink and ExVectrNetwork `feature/air-link-fhss`, ExVectrPackets 8170849) (pins, library table, `src_network/` and test entries only; the rest of this doc is as of 4830874)
+Last verified against commit: ce2b498 + `feature/gs-requests-and-upload` (submodules: ExVectrNetwork de708ca, ExVectrPackets 4ca8fb1 local) (pins, library table, `src_network/` and test entries only; the rest of this doc is as of 4830874)
 
 ## Repository layout
 
@@ -34,8 +34,8 @@ ExVectrLink/                 (github.com/ExVeCtr/ExVectrLink parent firmware rep
 │   ├── Config.hpp, tests/   Radio bench tests, enabled by #defines in Config.hpp (all off)
 ├── src_network/             ExVectrNetwork-mode firmwares (envs exvectrlink_tx_module_network, exvectrlink_rx_network_*; never built
 │                            by the FPV envs): routers (node 2, node 3), air access on FHSS, CRSF <-> network mapping, upload
-│                            triggers; target/ (shared radio glue), target_tx/, target_rx/ are the Arduino files (network-mode.md)
-├── test/test_network_mode/  Host Unity tests: TX router (pio test -e native)
+│                            triggers and the link upload command (LinkUploadCommand.hpp); target/ (shared radio glue), target_tx/, target_rx/ are the Arduino files (network-mode.md)
+├── test/test_network_mode/  Host Unity tests: TX router, link upload command (pio test -e native)
 ├── test/test_air_link/      Host Unity tests: air access, RX router, end to end, FHSS maths (pio test -e native)
 ├── test/test_fhss/          Host Unity tests of the real FHSS on fake radios, FPV golden trace (pio test -e native_fhss)
 ├── test/stubs/Arduino.h     Empty Arduino.h for the FHSS host build
@@ -68,8 +68,8 @@ Rule of thumb: code that both ends of the link need goes in the library. Board, 
 | `lib/ExVectrCore` | 18bbb09 | Scheduler (`scheduler2.hpp`), `Task_Periodic`, time (`Core::NowNs()`), containers (`ListArray`, `ListBuffer`), `HandlerGroup`, printing |
 | `lib/ExVectrHAL` | 46b2460 | `HAL::DigitalIO` and GPIO interfaces |
 | `lib/ExVectrArduinoPlatform` | 6fb1434 (branch ESP32-Branch) | `Platform::BusUART`, `PinGPIO`, `BusSPIDevice`, `Memory_ArduinoEEPROM` |
-| `lib/ExVectrNetwork` | `feature/air-link-fhss` (on 4090dce: adds `EgressFilter::addDstDrop/addSrcDrop`, `Node::pinRoute`) | SX1280 driver (`datalink/sx1280/Sx1280_Direct`, vendored `sx12xxAL`), `DataPacket`, `DatalinkI` (FPV). New stack (network mode only): `StreamFrameLink`, `Node`, `PortMux`, `AirFrameLink`; the old network/transport/`Datalink` classes are gone. Channel plan: 20 channels, 2425–2475 MHz (`lib/ExVectrNetwork/include/ExVectrNetwork/datalink/sx1280/Sx1280_Direct.hpp:183`) |
-| `lib/ExVectrPackets` | 8170849 (Development; was 46286bd) | Schema-generated packets `gen/ExVectrPackets/gen/*.hpp` (network mode: `RcState`, `LinkStats`, `HandsetTelem`, `LogText`, `kSchemaHash`); legacy hand-written: RC mux packets (`radiolink/packets/RadioLinkMuxPackets.hpp`), `Telemetry_*`/`Telecommand_*`, CRSF packet classes, `PacketManager` |
+| `lib/ExVectrNetwork` | `feature/gs-requests-and-upload` de708ca (on `feature/air-link-fhss`: adds `EgressFilter::addDstDrop/addSrcDrop`, `Node::pinRoute`; now also `addSrcPortDrop`) | SX1280 driver (`datalink/sx1280/Sx1280_Direct`, vendored `sx12xxAL`), `DataPacket`, `DatalinkI` (FPV). New stack (network mode only): `StreamFrameLink`, `Node`, `PortMux`, `AirFrameLink`; the old network/transport/`Datalink` classes are gone. Channel plan: 20 channels, 2425–2475 MHz (`lib/ExVectrNetwork/include/ExVectrNetwork/datalink/sx1280/Sx1280_Direct.hpp:183`) |
+| `lib/ExVectrPackets` | 4ca8fb1 (local commit on `feature/link-upload-action`, adds `RequestAction::kLinkUploadMode`, schema hash 0x3AFA3CCE; pinned on this feature branch only; Development has 8170849) | Schema-generated packets `gen/ExVectrPackets/gen/*.hpp` (network mode: `RcState`, `LinkStats`, `HandsetTelem`, `LogText`, `kSchemaHash`); legacy hand-written: RC mux packets (`radiolink/packets/RadioLinkMuxPackets.hpp`), `Telemetry_*`/`Telecommand_*`, CRSF packet classes, `PacketManager` |
 | `lib/ExVectrData` | 283596f | `Memory_Manager` / `Memory_Internal` behind the settings store |
 | `lib/ExVectrLink` | `feature/air-link-fhss` (on f3204bb: FHSS runtime parameters, `FhssMath.hpp`, `AirProfile.hpp`) | The link library (table above) |
 | `lib/SBUS` | 3dcd5b4 | bolderflight SBUS, only for the `ENABLE_SBUS` path (no env enables it) |

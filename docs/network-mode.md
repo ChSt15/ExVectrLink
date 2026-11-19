@@ -2,7 +2,7 @@
 
 > Separately compiled firmwares that run the ExVectrNetwork stack instead of the FPV link: the **TX module** (Radiomaster Pocket, diversity board) as node 2 and the **vehicle receiver** as node 3. Both are routers. They talk over the existing FHSS with a network-mode air profile and carry ExVectrNetwork frames end to end: USB (ground station) ↔ TX module ↔ air ↔ RX module ↔ UART (vehicle). The FPV firmwares are unchanged.
 
-Last verified against commit: 35fafb1 + `feature/air-link-fhss` (submodules: ExVectrLink `feature/air-link-fhss`, ExVectrNetwork `feature/air-link-fhss`, ExVectrPackets 8170849)
+Last verified against commit: ce2b498 + `feature/gs-requests-and-upload` (submodules: ExVectrLink `feature/gs-requests-and-upload`, ExVectrNetwork `feature/gs-requests-and-upload` de708ca, ExVectrPackets 4ca8fb1 local, schema hash 0x3AFA3CCE)
 
 Spec: workspace `docs/network-design.md`. The **Revision 1 box** at its top supersedes the text below it: FHSS (not a new TDMA) carries the air link, air profile v1, fixed full-length packets, 1:1 slot ratio, compile-time separation on the ESP8285, over-the-air upload and the 60 s sync failsafe kept. Also sections 3.2 (datalinks), 3.3 (network, filters), 3.3.5 (timeouts), 4 (wire format), 5.3. Stack docs: `lib/ExVectrNetwork/docs/` (`node.md`, `wire.md`, `aggregator.md`, `sx1280-frame-length.md`). Packets: `lib/ExVectrPackets/docs/`.
 
@@ -25,6 +25,7 @@ src_network/
   NetCrsf.hpp/.cpp        pure: CRSF <-> RC_STATE mapping, CRSF telemetry builders, handset reply scheduler (TX)
   NetworkRouter.hpp/.cpp  pure: node 2 router (TX module)
   RxRouter.hpp/.cpp       pure: node 3 router (vehicle receiver)
+  LinkUploadCommand.hpp   pure: the link-upload command (REQUEST action 10), ACKs and delay (both routers)
   NetAirAccess.hpp        pure: the air access on the FHSS slots (AirAccessI + FHSS pull hook), receive mailbox,
                           LQ, local air stats, LINK_STATS builder, TX power policy
   UploadTriggers.hpp      pure: sync failsafe, stale UART, command trigger for WiFi upload
@@ -132,23 +133,27 @@ The FHSS sync engine is reused unchanged (air-protocol.md "Sync states"): the fo
 
 ### Egress filters (ExVectrNetwork `EgressFilter`)
 
+User decision 2026-11-19: **only the ground station's HEARTBEAT is dropped over radio** (and its RC_STATE). Every other ground-station frame passes, in particular `REQUEST` (calibration commands, link upload) towards the vehicle and the link modules, and `REQUEST_ACK` back.
+
 | Router | Link | Rule | Why |
 |---|---|---|---|
-| TX (2) | air | `addSrcDrop(0)`: **no ground-station traffic at all** | No frame from the ground station crosses the radio towards the vehicle: not its heartbeat, not its RC_STATE, not its REQUESTs. A ground-station failure can never affect the vehicle over radio. |
-| TX (2) | air | `addDstDrop(0)` | Nothing addressed to the ground station belongs on the air (`Node::send` floods a unicast frame while it has no route: the dst-0 copy of the Pocket's RC_STATE would otherwise go on the air whenever no ground station is attached). |
-| TX (2) | air | `addRule(usb, 0x10)` | RC_STATE that arrived over USB never goes to air, whatever source it claims (second layer). |
-| TX (2) | air | `addHeartbeatDrop(0)`, `portLimit 0x80` | explicit node 0 heartbeat rule (also covered by the source drop); USB-only ports |
+| TX (2) | air | `addHeartbeatDrop(0)` | the ground station's heartbeat never goes on the air (the vehicle must not see the ground station as a peer; it is also not a failure condition) |
+| TX (2) | air | `addRule(usb, 0x10)` | RC_STATE that arrived over USB never goes to air, whatever source it claims. The Pocket (originated locally, ingress `kIngressLocal`) is the only RC source on the radio path. |
+| TX (2) | air | `addDstDrop(0)` | Nothing addressed to the ground station belongs on the air (it is on USB). `Node::send` floods a unicast frame while it has no route: the dst-0 copy of the Pocket's RC_STATE would otherwise go on the air whenever no ground station is attached. |
+| TX (2) | air | `portLimit 0x80` | USB-only debug ports |
 | TX (2) | USB | `addDstDrop(1)` | the dst-1 copy of the Pocket's RC_STATE stays off USB (the ground station gets its own dst-0 copy) |
 | TX (2) | USB | `LinkGuard` gate | refuse while no host is attached or more than 256 bytes wait in the TX ring; nothing is held back |
-| RX (3) | UART | `addSrcDrop(0)` | **node 0 heartbeats, RC_STATE from node 0 and every other ground-station frame never reach the vehicle from the air side** (second layer behind the TX module) |
+| RX (3) | UART | `addHeartbeatDrop(0)` | no ground-station heartbeat reaches the vehicle |
+| RX (3) | UART | `addSrcPortDrop(0, 0x10)` | **no RC_STATE from node 0 ever reaches the vehicle** (second layer behind the TX module). RC_STATE from node 2 (the Pocket) passes. Other node 0 frames (REQUEST, ...) pass. |
 | RX (3) | UART | `addDstDrop(0)`, `portLimit 0x80` | the vehicle is an end node and never forwards, frames for the ground station are useless there; USB-only ports |
 | RX (3) | air | `addDstDrop(1)`, `portLimit 0x80` | nothing addressed to the vehicle goes back on the air; USB-only ports |
 
-`addDstDrop`/`addSrcDrop` are new in ExVectrNetwork (`feature/air-link-fhss`). They replace the destination drops that `LinkGuard` used to do; `LinkGuard` now only implements the USB gate.
+- Frames from the vehicle to node 0 (REQUEST_ACK, telemetry) pass both routers: RX air egress (only dst 1 is dropped), then the TX module's pinned route to USB (host tests `test_e2e_request_ack_from_vehicle_reaches_usb`, `test_vehicle_request_ack_reaches_usb`).
+- `addDstDrop`, `addSrcDrop` and `addSrcPortDrop(src, port)` are ExVectrNetwork additions (`feature/air-link-fhss`, `feature/gs-requests-and-upload`). `LinkGuard` only implements the USB gate. `addSrcDrop` is no longer used by the firmwares.
 
 ### Pinned routes
 
-The topology is fixed, so both routers pin their unicast routes (`Node::pinRoute`, new in ExVectrNetwork): TX module: node 1 and node 3 → air, node 0 → USB. RX module: node 1 → UART, node 0 and node 2 → air. Without pins a single frame with a forged source (for example the bench injection of `HANDSET_TELEM` with src 1 over USB) made the TX module learn "node 1 is on USB" and send the Pocket's RC_STATE there for the 3 s route lifetime, where the dst-1 drop discarded it. Pinning keeps RC_STATE on the air link whatever arrives on USB (host test `test_e2e_ground_station_never_reaches_uart`).
+The topology is fixed, so both routers pin their unicast routes (`Node::pinRoute`, new in ExVectrNetwork): TX module: node 1 and node 3 → air, node 0 → USB. RX module: node 1 → UART, node 0 and node 2 → air. Without pins a single frame with a forged source (for example the bench injection of `HANDSET_TELEM` with src 1 over USB) made the TX module learn "node 1 is on USB" and send the Pocket's RC_STATE there for the 3 s route lifetime, where the dst-1 drop discarded it. Pinning keeps RC_STATE on the air link whatever arrives on USB (host test `test_e2e_gs_heartbeat_and_rc_never_reach_uart_but_request_does`).
 
 ### RC state
 
@@ -194,15 +199,26 @@ Over-the-air (WiFi, ArduinoOTA) upload stays possible on both modules (Revision 
 | Button held 3 s while running | yes | yes | keeps running, WiFi next to it (as FPV) |
 | **60 s sync failsafe**: FHSS never left `Searching` within 60 s of boot (reaching `Syncing` once cancels it for good) | yes | yes | stopped until reset |
 | **Stale UART**: no valid stream frame from the UART host within 60 s of boot (one valid frame cancels it for good) | – | yes | stopped until reset |
-| **Network upload command** | – | hook only | – |
+| **Network upload command** (REQUEST action 10, target = module id, from any link) | yes | yes | stopped until reset, 400 ms after the ACK was queued |
 
 - The sync failsafe on the TX side means "no packet from a receiver in the last second", as in FPV: a TX module powered for 60 s without its receiver goes to upload mode. Same operational caveat as FPV (known-issues.md).
 - The stale-UART trigger only fires if the host was **never** seen since boot, so a vehicle that goes quiet later (in flight) never stops the receiver's link. On the bench, connect the UART host (or send any valid stream frame) within 60 s of powering the receiver.
-- The network upload command is **not bound to any packet yet** (no packet or REQUEST action for it exists in ExVectrPackets; open point below). `UploadTriggers::requestCommand()` is the hook.
+- See "Link upload command" below for the network upload command.
 - The FPV over-the-air test commands (block, force resync, sync offset) do not exist in network mode.
 - The TX module keeps USB flashing (the CDC handles the 1200 baud reset; otherwise hold the boot button while plugging in).
 - On entering upload mode the module sends one `LOG_TEXT` with the reason (it may not get out before the link stops).
 - In upload mode the ArduinoOTA progress callbacks print on `Serial`: on the receiver that is the vehicle UART (the link is stopped then; the host resynchronises later).
+
+## Link upload command
+
+`REQUEST` (port 0x11, QoS event) with `action = LINK_UPLOAD_MODE (10)` and `target` = the module's own node id (TX module 2, receiver 3), implemented in `src_network/LinkUploadCommand.hpp` (subscribed on the router's port mux). User decision 2026-11-19, an explicit exception to safety.md 2.5:
+
+- **Accepted from any link** (USB, UART, air) and **always honoured**: no armed or on-ground condition, no other gating. The module cannot know the vehicle state. The senders guard against accidents (ground station: only behind a deliberate confirmation; TX module: only from the Lua menu entry; the flight software ignores action 10).
+- **Idempotent:** the first accepted request fixes the deadline (`rxTime + kUploadDelayNs`). A retry (same `req_id`, or any later request while pending) does not move it. **Every copy is answered** with `REQUEST_ACK` (`req_id` echoed, status `Done`, detail 0), addressed to the requester (dst = request src, src = module), sent from `poll()` (not inside the receive callback). The ACK queue holds 4; a full queue drops the newest (the sender retries).
+- **Delay:** `LinkUploadCommand::kUploadDelayNs` = **400 ms**, the one place for the constant. Then `uploadCommandDue()` becomes true, the main loop calls `UploadTriggers::requestCommand()` and enters the existing WiFi upload mode (stops the air link until reset). On the receiver the ACK crosses the air first (next own slot, at most 40 ms plus the TX module's USB forward); if it is lost the sender retries into a silent link, which is acceptable.
+- **Never triggers on anything else:** a request for another target (it is forwarded by the router as usual: a request for node 3 from the ground station crosses the TX module's air link), another action, a payload shorter than the 12-byte `Request`, or `req_id` 0 (the schema says non-zero) is ignored and not acknowledged. Frames that fail the link CRC never reach the handler. `PortMux` additionally drops a copy with a repeated `(src, seq)` within 1 s, so a retry needs a new frame (sequence number), as every sender produces.
+- The ACK is a normal frame: from the receiver to node 0 it takes the air (pinned route) and the TX module forwards it to USB; to node 1 (UART host) it goes on the UART.
+- The sender is not in this repo. `req_id`s should be unique per operator action and reused on retry.
 
 ## Receiver UART (vehicle side)
 
@@ -229,8 +245,8 @@ Over-the-air (WiFi, ArduinoOTA) upload stays possible on both modules (Revision 
 - `test/test_fhss` (env `native_fhss`, C++20, compiles the real `FHSS.cpp` with ExVectrCore and a fake clock and fake radios):
   - **FPV golden trace:** everything both FPV ends transmit in 3 s (bytes, channels, slot timing in µs) hashes to the value recorded from the unmodified FHSS. Any change to the FPV air format or timing fails it.
   - Network profile: parameters and trailer limits; lock from Searching; full 255-byte frames; the follower never transmits before Synced; 25 packets/s each way, own TX slot every 40 ms; sync held with 20 ppm mismatch; recovery after a 5 s block; FPV and network never accept each other.
-- `test/test_air_link` (env `native`): time on air (10.56 ms, and 10.38 ms with 8 symbols/no CRC), slot budget, expected rates, slot roles, trailer seeds and counters (FPV golden values), phase wrap and filter steps; LQ counter; RC_STATE expiry evaluated at the slot start; priority order; downlink fill (≥ 5 kB/s); mailbox, keep-alive, corrupted packet, LQ, LINK_STATS fields, SFC; direction; RX router filters both ways, LINK_STATS 5 Hz with LQ 0 / Searching, no RC state without air; upload triggers; power policy; no heap use; end to end (TX router + air + RX router over simulated slots): RC_STATE at 25 Hz on the RX UART, no ground-station frame ever on the UART (including a forged source), Pocket off → silence, no stale release after a 5 s block.
-- `test/test_network_mode` (env `native`): the TX router (CRSF mapping, filters, heartbeat, telemetry conversions, round robin), now against the real air access.
+- `test/test_air_link` (env `native`): time on air (10.56 ms, and 10.38 ms with 8 symbols/no CRC), slot budget, expected rates, slot roles, trailer seeds and counters (FPV golden values), phase wrap and filter steps; LQ counter; RC_STATE expiry evaluated at the slot start; priority order; downlink fill (≥ 5 kB/s); mailbox, keep-alive, corrupted packet, LQ, LINK_STATS fields, SFC; direction; RX router filters both ways (node 0 heartbeat and RC_STATE dropped at the UART egress, node 0 REQUEST passes, REQUEST_ACK to node 0 goes on the air), link upload command on the RX module (UART and air, ACK content and addressing, delay, repeated id, wrong target/action/short/id 0), LINK_STATS 5 Hz with LQ 0 / Searching, no RC state without air; upload triggers; power policy; no heap use; end to end (TX router + air + RX router over simulated slots): RC_STATE at 25 Hz on the RX UART, no ground-station heartbeat or RC_STATE on the UART (including a forged source) while its REQUESTs do reach it, REQUEST_ACK from the vehicle reaches USB, upload command to the RX module over the air (ACK reaches USB before the module is due) and to the TX module, Pocket off → silence, no stale release after a 5 s block.
+- `test/test_network_mode` (env `native`): the TX router (CRSF mapping, filters, heartbeat, telemetry conversions, round robin), now against the real air access. Filters: node 0 heartbeat and RC_STATE (from USB) never on air; node 0 REQUEST, broadcast data pass; dst 0 never on air. Link upload command on the TX module (USB and air, ACK content and addressing, delay, idempotence, wrong target/action/short/id 0, a request for node 3 is forwarded and not executed).
 
 ## Bench plan (user, hardware)
 
@@ -241,18 +257,19 @@ Hardware: the TX module (Pocket) flashed with `exvectrlink_tx_module_network`, a
 3. **Uplink RC_STATE at 25 Hz:** count `RC_STATE` frames (port 0x10, src 2, dst 1) on the receiver UART over 10 s: about 250. Move the Pocket sticks: the values follow (-1000..1000, centre 0).
 4. **Downlink throughput:** have the UART host send telemetry above the air capacity (for example 40 latest-wins streams of 40-byte frames, port 0x20..0x47, dst 0, every 40 ms). Measure the frame bytes arriving at the ground station: at least 5 kB/s (about 6 kB/s expected). Receiver `LINK_STATS` queue peak high, frames expired/dropped counting, sync unaffected.
 5. **RF block of 5 s:** shield one end or unplug the antennas for 5 s. After about 3 s the receiver reports Searching and LQ 0 (still at 5 Hz on the UART); RC_STATE stops on the UART within about 140 ms of the block. After the block the link is Synced again within a few seconds and RC_STATE resumes **without a burst of old frames** (check sequence numbers and arrival times).
-6. **Ground station never reaches the UART:** with the ground station connected on the TX module's USB, the receiver UART must never show a frame with src 0: no node 0 heartbeat, no RC_STATE from node 0, no REQUEST from node 0. Also enable the ground station's virtual radio on the TX-module source (if the GUI allows it): no RC_STATE from USB appears on the UART.
+6. **Ground-station traffic over radio:** with the ground station connected on the TX module's USB: (a) a ground-station `REQUEST` to the vehicle (for example a calibration start) **reaches the receiver UART** (src 0, dst 1, port 0x11), and the vehicle's `REQUEST_ACK` comes back to the ground station; (b) the ground station's **heartbeat does not** appear on the UART; (c) **RC_STATE from the ground station does not** appear on the UART (enable the ground station's virtual radio on the TX-module source if the GUI allows it; only the Pocket's RC_STATE, src 2, shows); (d) the same with RC_STATE injected over USB with src 1.
 7. **Pocket off:** switch the Pocket off (or stop CRSF): RC_STATE on the UART stops within about 140 ms; nothing is repeated.
 8. **Injection over USB** (unchanged bench step from the USB-side task): inject `HANDSET_TELEM` (src 1) and `LINK_STATS` (src 3) from the ground-station side. The Pocket shows them, and the Pocket's RC_STATE keeps reaching the receiver UART throughout (pinned routes).
 9. **Power control:** with dynamic power enabled in the stored FPV settings, the TX module's `LINK_STATS` tx power steps down to the dynamic minimum at close range and up when the receiver's LQ/RSSI drop.
+10a. **Upload command:** from the ground station (behind its deliberate confirmation) send `REQUEST` action 10 with target 2: the ground station shows the `REQUEST_ACK` (src 2, status 0, detail 0), and about 400 ms later the TX module is in WiFi upload mode (reachable by espota, the link is stopped). Power-cycle. Then target 3: the ACK arrives over the air, about 400 ms after the request the receiver is in WiFi upload mode (UART host sees LINK_STATS stop). With the receiver out of range, the request gets no ACK and nothing happens. Repeat the same `req_id` several times: every copy is acknowledged, the module still enters upload mode once. A request with another target or action (for example target 1) does nothing on the modules. Do this only on the bench, never on a vehicle that is armed or flying.
 10. **Upload paths:** (a) receiver powered without a TX module: after 60 s it is in WiFi upload mode and reachable by espota; (b) receiver powered with a TX module but no UART host: after 60 s in WiFi upload mode; (c) boot button held at power-up: WiFi only.
 11. **Sync latency compensation check:** if uplink or downlink LQ is consistently below the other, the 900 µs default is off for this profile: report it (the value is a constant in `FHSS.hpp`, calibrated per target and modulation).
 12. **FPV regression:** flash the FPV envs (`exvectrlink_tx_module_diversity` + an FPV receiver) and check RC link, CRSF telemetry and FHSS lock as before.
 
 ## Open points
 
-- **Network upload command:** which packet triggers WiFi upload on the receiver (and the TX module's convenience path)? No REQUEST action or packet for it exists in ExVectrPackets. It stops the link, so it needs a safety rule (for example refused unless the vehicle reports disarmed, which the receiver cannot know). Hook: `UploadTriggers::requestCommand()`.
+- **Network upload command:** done (see "Link upload command"); only the senders are open (ground-station confirmation, Lua menu entry on the TX module).
 - **Stale-UART semantics:** implemented as "no valid frame from the host within 60 s of boot, cancelled for good by the first frame". Confirm, or define a different timeout.
-- **Ground-station traffic over radio:** the TX module now drops every frame from node 0 at its air egress (and the receiver drops them at its UART egress). The USB-side step forwarded ground-station REQUESTs to the vehicle over radio; that no longer happens. Confirm this is wanted.
+- **Ground-station traffic over radio:** decided 2026-11-19: only its heartbeat (and RC_STATE) is dropped, REQUESTs and everything else pass (see "Egress filters").
 - Sync latency compensation for this profile (bench item 11).
 - Downlink-heavy slot ratio (Revision 1, later): FHSS still has one role-reversal slot per period; a generalisation is needed.

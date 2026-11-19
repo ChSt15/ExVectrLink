@@ -9,8 +9,8 @@ namespace VCTR::ExVectrLink::netmode {
 ///    good, exactly as the FPV SyncFailsafeMonitor);
 ///  - stale UART (receiver only): no valid stream frame from the UART host within 60 s of boot (seeing one once
 ///    cancels it for good, so a host that goes quiet later, for example in flight, never stops the link);
-///  - a command: requestCommand() (hook for the network upload command; no packet is bound to it yet, see
-///    docs/network-mode.md "Open points").
+///  - a command: requestCommand() (called by the main loop once LinkUploadCommand reports the REQUEST action 10 due,
+///    docs/network-mode.md "Link upload command").
 /// Each fires at most once. Entering upload mode stops the link until reset.
 class UploadTriggers {
 public:

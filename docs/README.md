@@ -21,9 +21,10 @@ These docs are versioned with the code. **Keep them current:** a change isn't fi
 
 - Every doc states `Last verified against commit:` (parent repo commit, plus the submodule pins where relevant). If the code has moved past it, treat the doc as possibly stale and re-check the parts you rely on.
 - Code is cited as `path:line`, relative to the repo root (`src/...`, `lib/ExVectrLink/...`). Line numbers drift, so re-check them when editing.
+- `feature/gs-requests-and-upload` changed `src_network/` (egress filters: only the ground-station heartbeat and RC_STATE are dropped over radio; new `LinkUploadCommand`), the network-mode tests and two pins (ExVectrNetwork `addSrcPortDrop`, ExVectrPackets with `LINK_UPLOAD_MODE`). Nothing in `src/` changed.
 - `feature/air-link-fhss` changed the FHSS library (runtime parameters, FPV defaults unchanged and checked by a golden-trace test), `src_network/`, the network envs and tests, and two ExVectrNetwork additions. Nothing in `src/` changed.
 - `feature/tx-network-router` changed only what the network-mode docs and the files listed there describe (new `src_network/`, new envs, library pins); the FPV code in `src/` is untouched, and docs about it keep their older `Last verified` commit.
 - `feature/remove-serial` deleted code from `src/main.cpp`, `src/DatalinkCommandManager.cpp` and `src/WifiUpload.cpp`. Where those docs cite line numbers in those files, the numbers were not all re-checked and may be off. Their `Last verified` commit is deliberately left at the pre-removal commit.
 - "TX side" means the handset end (`IS_TX_SIDE`). "RX side" means the vehicle end. "Uplink" is TX → RX, "downlink" is RX → TX.
 
-Last verified against commit: 35fafb1 + feature/air-link-fhss (submodules: ExVectrLink and ExVectrNetwork `feature/air-link-fhss`, ExVectrPackets 8170849). Docs that this branch did not touch keep their own, older commit.
+Last verified against commit: ce2b498 + `feature/gs-requests-and-upload` (submodules: ExVectrNetwork de708ca, ExVectrPackets 4ca8fb1 local). Docs that this branch did not touch keep their own, older commit.
