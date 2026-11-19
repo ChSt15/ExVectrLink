@@ -2,7 +2,7 @@
 
 > Every `[env:...]` in `platformio.ini`: which board it builds for, which role it plays, and the pin map it uses.
 
-Last verified against commit: 4830874
+Last verified against commit: fb04cb8 + feature/tx-network-router (env table and sizes; submodules ExVectrNetwork 4090dce, ExVectrPackets 8170849)
 
 ## How a build is configured
 
@@ -30,16 +30,33 @@ Last verified against commit: 4830874
 | Env | Board / MCU | Role | Flags | Pin map | Build status after serial removal |
 |---|---|---|---|---|---|
 | `esp32-pico` | `esp8285` (despite the name) | none | none | none | **Fails:** no `TARGET_*`, and the ESP8266 toolchain without `-std=gnu++2a` rejects `concept` |
-| `exvectrlink_tx_module` | `esp32-s3-devkitc-1`, 16 MB flash, OPI PSRAM enabled | TX module, 1 radio | `TARGET_EXVECTRLINKTXMODULE`, `ENABLE_CRSF_INPUT`, `BOARD_HAS_PSRAM` | `ExVectrLinkTxModule.hpp` | Builds (RAM 18.2 %, flash 35.4 %) |
-| `exvectrlink_tx_module_diversity` | `esp32-s3-devkitc-1`, 16 MB flash, **PSRAM disabled** | TX module for the Radiomaster Pocket, true diversity (2 radios) | `TARGET_EXVECTRLINKTXMODULEDIVERSITY`, `ENABLE_CRSF_INPUT` | `ExVectrLinkTxModuleDiversity.hpp` | Builds (RAM 18.2 %, flash 35.3 %) |
-| `exvectrlink_genericdiversity_lr_ota` | `pico32` (ESP32) | RX, diversity, CRSF to FC, upload to 192.168.178.144 | `TARGET_GENERICDIVERSITY_ELRS`, `ENABLE_CRSF` | `GenericDiversityELRS.hpp` | Builds (RAM 18.1 %, flash 89.7 %) |
+| `exvectrlink_tx_module` | `esp32-s3-devkitc-1`, 16 MB flash, OPI PSRAM enabled | TX module, 1 radio | `TARGET_EXVECTRLINKTXMODULE`, `ENABLE_CRSF_INPUT`, `BOARD_HAS_PSRAM` | `ExVectrLinkTxModule.hpp` | Builds (RAM 18.2 %, flash 35.3 %, 59632 / 1180535 bytes) |
+| `exvectrlink_tx_module_diversity` | `esp32-s3-devkitc-1`, 16 MB flash, **PSRAM disabled** | TX module for the Radiomaster Pocket, true diversity (2 radios) | `TARGET_EXVECTRLINKTXMODULEDIVERSITY`, `ENABLE_CRSF_INPUT` | `ExVectrLinkTxModuleDiversity.hpp` | Builds (RAM 18.3 %, flash 35.2 %, 59892 / 1176445 bytes) |
+| `exvectrlink_tx_module_network` | `esp32-s3-devkitc-1`, 16 MB flash, PSRAM disabled (as the diversity env) | **ExVectrNetwork mode** TX module: node 2 router, USB network stream, CRSF relay, air stub. Separate firmware, builds only `src_network/` + `src/CRSF.cpp` (see [network-mode.md](network-mode.md)) | `TARGET_EXVECTRLINKTXMODULEDIVERSITY`, `ARDUINO_USB_CDC_ON_BOOT=1`, `CORE_DEBUG_LEVEL=0` (no `ENABLE_CRSF_INPUT`: `IS_TX_SIDE`/FHSS/`main.cpp` are not part of it) | `ExVectrLinkTxModuleDiversity.hpp` | Builds (RAM 10.8 %, flash 11.3 %, 35392 / 377008 bytes) |
+| `native` | host | Test-only: Unity tests of `src_network/` (`pio test -e native`). Not a firmware: always pass `-e` to `pio run`. | none | none | 33 tests pass |
+| `exvectrlink_genericdiversity_lr_ota` | `pico32` (ESP32) | RX, diversity, CRSF to FC, upload to 192.168.178.144 | `TARGET_GENERICDIVERSITY_ELRS`, `ENABLE_CRSF` | `GenericDiversityELRS.hpp` | Builds (RAM 18.1 %, flash 89.6 %, 59408 / 1173883 bytes) |
 | `exvectrlink_genericdiversity_ripper_ota` | `pico32` | same as above, different upload IP (192.168.178.184) | same | same | Builds (same size as `_lr_ota`) |
-| `exvectrlink_generic_esp8285_ota` | `esp8285` | RX, single radio, no PA, CRSF to FC | `TARGET_GENERICESP8285`, `ENABLE_CRSF`, `-std=gnu++2a`, `NON32XFER_HANDLER` | `GenericEsp8266.hpp` | Builds (RAM 42.9 %, flash 48.8 %) |
-| `exvectrlink_generic_esp8285_pa_ota` | `esp8285` | RX, single radio with PA/LNA, CRSF to FC, WiFi on at boot | `TARGET_GENERICESP8285WITHPA`, `ENABLE_FORCEWIFI`, `ENABLE_CRSF`, … | `GenericEsp8266WithPA.hpp` | Builds (RAM 42.9 %, flash 48.8 %) |
+| `exvectrlink_generic_esp8285_ota` | `esp8285` | RX, single radio, no PA, CRSF to FC | `TARGET_GENERICESP8285`, `ENABLE_CRSF`, `-std=gnu++2a`, `NON32XFER_HANDLER` | `GenericEsp8266.hpp` | Builds (RAM 43.1 %, flash 48.8 %, 35288 / 371547 bytes) |
+| `exvectrlink_generic_esp8285_pa_ota` | `esp8285` | RX, single radio with PA/LNA, CRSF to FC, WiFi on at boot | `TARGET_GENERICESP8285WITHPA`, `ENABLE_FORCEWIFI`, `ENABLE_CRSF`, … | `GenericEsp8266WithPA.hpp` | Builds (RAM 43.1 %, flash 48.8 %, 35288 / 371563 bytes) |
 
 "Builds" means it compiled and linked with a placeholder `src/WifiCredentials.cpp`. Without that gitignored file every env fails at link (see known-issues.md).
 
 The `exvectrlink_controller_usb` and `exvectrlink_controller_ota` envs (old ExVectrController handset, `TARGET_EXVECTRCONTROLLER`) were removed with the serial protocol: they only existed for a serial host. Every RX env sets `ENABLE_CRSF`. A Starship receiver needs a new env once its host interface is designed (see roadmap.md).
+
+### Sizes before and after `feature/tx-network-router`
+
+Release builds with a placeholder `src/WifiCredentials.cpp`. "Before" is Development `fb04cb8` with ExVectrNetwork 7cb0e79 and ExVectrPackets 46286bd. "After" has the library pins moved to ExVectrNetwork 4090dce and ExVectrPackets 8170849. Nothing in `src/` changed, and no network-mode code is linked into the FPV envs (`nm` finds no `network::Node`, and the size is identical with the new env present).
+
+| Env | RAM before | RAM after | Flash before | Flash after |
+|---|---|---|---|---|
+| `exvectrlink_tx_module_diversity` | 59636 | 59892 (+256) | 1178185 | 1176445 (-1740) |
+| `exvectrlink_tx_module` | 59504 | 59632 (+128) | 1182275 | 1180535 (-1740) |
+| `exvectrlink_genericdiversity_lr_ota` (and `_ripper_ota`) | 59152 | 59408 (+256) | 1175631 | 1173883 (-1748) |
+| `exvectrlink_generic_esp8285_ota` | 35160 | 35288 (+128) | 371403 | 371547 (+144) |
+| `exvectrlink_generic_esp8285_pa_ota` | 35160 | 35288 (+128) | 371419 | 371563 (+144) |
+| `exvectrlink_tx_module_network` (new) | - | 35392 | - | 377008 |
+
+The small RAM increase in every FPV env comes from the library update (not investigated in detail; the `Sx1280_Direct` driver changed, its maximum frame length is now configurable with default 128). See known-issues.md. The ESP8285 has 81920 bytes of RAM, so +128 bytes matters there.
 
 ### PSRAM on the diversity TX module
 

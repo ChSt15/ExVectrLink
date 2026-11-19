@@ -10,6 +10,8 @@ The link library itself is the `lib/ExVectrLink` submodule. Packet formats are i
 
 Part of the ExVectrStarship workspace (`../CLAUDE.md`). This file and `docs/` are enough to work on ExVectrLink on its own.
 
+**Status:** `feature/tx-network-router` adds a separately compiled TX-module env `exvectrlink_tx_module_network` (ExVectrNetwork node 2 router, USB side, air stub), see [docs/network-mode.md](docs/network-mode.md). The FPV envs are unchanged. Open: the FHSS air link for that mode and the runtime mode switch.
+
 **Read [docs/README.md](docs/README.md) first.** It indexes how the firmware works: air protocol, CRSF, targets, known issues. Don't re-derive these from scratch.
 
 ## Rules
@@ -39,6 +41,8 @@ The PlatformIO binary on this machine is `~/.platformio/penv/bin/pio`. Run it fr
 ```sh
 ~/.platformio/penv/bin/pio run -e exvectrlink_tx_module_diversity      # TX module (Pocket), 2 radios
 ~/.platformio/penv/bin/pio run -e exvectrlink_tx_module                # TX module, 1 radio
+~/.platformio/penv/bin/pio run -e exvectrlink_tx_module_network        # TX module, ExVectrNetwork mode (separate firmware, no FPV code)
+~/.platformio/penv/bin/pio test -e native                              # host tests of src_network/
 ~/.platformio/penv/bin/pio run -e exvectrlink_genericdiversity_lr_ota  # RX, ESP32 + 2 radios, CRSF out
 ~/.platformio/penv/bin/pio run -e exvectrlink_generic_esp8285_ota      # RX, ESP8285, CRSF out
 ```

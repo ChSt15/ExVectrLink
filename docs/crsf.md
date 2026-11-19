@@ -2,7 +2,7 @@
 
 > CRSF on both ends of the link: the TX module talking to an EdgeTX handset, and the receiver talking to a flight controller.
 
-Last verified against commit: 4830874 (submodule ExVectrPackets 46286bd)
+Last verified against commit: fb04cb8 + feature/tx-network-router (new section only; the rest of this doc is as of 4830874, ExVectrPackets 46286bd)
 
 ## Generic CRSF class (`src/CRSF.hpp`, `src/CRSF.cpp`)
 
@@ -94,6 +94,15 @@ Full duplex on `Serial` (UART0) at **420000 baud** (`src/CRSFRcOutput.hpp:60`, `
 - **`Telecommand_UpdateMode`** received in a `Data` frame enters WiFi upload mode (`src/CRSFRcOutput.cpp:144-148`).
 - **Not ported:** bind command detection from the FC (the legacy `CRSFOutput.cpp:451-453` mapped it to WiFi upload mode).
 - **Statistics** (`getCrsfRcPacketRateHz`, `getCrsfTxFailureRateHz`, `getCrsfMaxRcFrameGapUs`) feed `SlotStats` and the debug output.
+
+## Network mode: CRSF <-> ExVectrNetwork translation (TX module, separate firmware)
+
+The firmware `exvectrlink_tx_module_network` does not use `CRSFRcInput`. It uses the generic `CRSF` class (same 400 kBaud, inverted, half-duplex pin set-up as `CRSFRcInput::taskInit()`) and translates in `src_network/NetCrsf.cpp`:
+- `0x16 RC_CHANNELS_PACKED` becomes `RC_STATE` (16 channels, `clamp(round((crsf - 992) * 1000 / 820), -1000, 1000)`, `SOURCE_OK`). Nothing is sent while the handset is silent for 100 ms, and RC state is never repeated or synthesised.
+- `LINK_STATS` (node 3) becomes `0x14 LINK_STATISTICS` (zeroed without node 3), `HANDSET_TELEM` becomes `0x21`, `0x02`, `0x1E`, `0x07`, `0x08`. One telemetry frame per handset frame, round robin.
+- Lua parameter frames (0x28, 0x2C, 0x2D) are discarded: no Lua menu in this firmware.
+
+Full mapping, scaling and rules: [network-mode.md](network-mode.md). FPV mode (the sections above) is unchanged.
 
 ## SBUS output (`ENABLE_SBUS`, stale)
 

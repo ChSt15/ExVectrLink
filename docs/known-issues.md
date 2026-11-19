@@ -2,7 +2,7 @@
 
 > Real problems found while reading the code for these docs. None of the entries in the table is fixed yet. Remove an entry when it is fixed, and add new ones as you find them.
 
-Last verified against commit: 4830874 (submodules: ExVectrLink 37ab8e2, ExVectrPackets 46286bd, ExVectrNetwork 7cb0e79)
+Last verified against commit: fb04cb8 + feature/tx-network-router (new network-mode entries; the older entries are as of 4830874)
 
 Severity: **High** = can lose the link or corrupt data in normal use, or blocks the Starship integration. **Medium** = wrong behaviour in some situations or misleading interfaces. **Low** = cosmetic, dead code or hygiene.
 
@@ -22,6 +22,10 @@ Severity: **High** = can lose the link or corrupt data in normal use, or blocks 
 | Low | `lib/ExVectrLink/include/ExVectrLink/datalink/FHSS.hpp:186`, `src/DatalinkCommandManager.hpp:53-55`, `src/CRSFRcInput.hpp:114-117` | Stale comments: the trailer layout, and "blocks for 500 ms" (actually 1514 ms). | Misleading for maintainers. |
 | Low | `src/DatalinkCommandManager.cpp` (`getRemote*RateHz`) | `getRemoteCrsfTxFailureRateHz()`/`getRemoteRcPacketRateHz()` always return 0. `RxState`, despite its name, is sent by both sides. | The debug print on the TX module shows remote rate fields that are always 0. |
 | Low | `src/CRSFInput.*`, `src/CRSFOutput.*`, `lib/CRSFforArduino/`, `firmware.bin` | Dead legacy code and a vendored library that are compiled or committed but not used. A 1 MB build artefact is committed. | Build time, repo size, and confusion about which class is live. |
+| Medium | `lib/ExVectrNetwork` `net/EgressFilter.hpp`, `src_network/LinkGuard.hpp` | The library's egress rules match port and ingress link only, and `Node::send` floods a unicast frame to every link when it has no fresh route. Network mode works around it in the app (`LinkGuard` drops DST 0 on air egress and DST 1 on USB egress). | Any new router app needs the same workaround, or the ground-station copy of RC_STATE goes on the air whenever no ground station is attached. A destination rule in the library would remove the wrapper. |
+| Medium | `src_network/target/network_main.cpp` (network env) | The network-mode firmware has no WiFi upload and no Lua menu. USB is the only way to flash it. The over-the-air test commands do not exist there. | By design for this step. The air-link task decides about WiFi upload (workspace design: over-the-air upload must stay possible), the sync failsafe and the test commands. |
+| Low | `lib/ExVectrNetwork` (library update) | After moving the pins to ExVectrNetwork 4090dce, every FPV env uses 128 to 256 bytes more RAM (ESP8285: 35160 to 35288 of 81920). Cause not investigated (the `Sx1280_Direct` driver changed). | Small, but the ESP8285 receiver is the tight target. |
+| Low | `platformio.ini` `[env:native]` | `pio run` without `-e` now also visits the test-only `native` env. | Always pass `-e <env>`. |
 | Low | `lib/SBUS` | Pinned to 3dcd5b4 (`v8.1.4-3-g3dcd5b4`), which may only exist in a local fetch. | A fresh clone may fail `git submodule update` for `lib/SBUS`. |
 | Low | `src/main.cpp:529`, `536`, `src/WifiUpload.cpp:138`, `204` | Existing warnings: `++` on `volatile` (deprecated in C++20), signed/unsigned compare. | Noise when checking for new warnings. |
 | Low | `src/CRSFRcInput.cpp:665-682` | The temperature Lua entry has no name set. | The handset shows an empty or default label. |
