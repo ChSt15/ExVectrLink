@@ -215,7 +215,9 @@ void loop() {
   usbLink.poll(); // flush what the router just queued
 
   if (triggers) {
+    if (router.uploadCommandDue()) triggers->requestCommand(); // ACK left in router.poll() + usbLink.poll() above
     const auto r = triggers->update(coreTime.nowNs(), netRadioLeftSearching(), false);
     if (r == UploadTriggers::Reason::SyncFailsafe) enterUploadMode("sync failsafe: no RX module for 60 s, WiFi upload");
+    else if (r == UploadTriggers::Reason::Command) enterUploadMode("upload command, WiFi upload");
   }
 }

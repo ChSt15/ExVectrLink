@@ -22,26 +22,25 @@ NetworkRouter::NetworkRouter(network::TimeSourceI &time, network::FrameLinkI &us
     : time_(time), airStats_(airStats), usbGuard_(usb, usbGate), node_(makeConfig(), time),
       linkStatsPort_(mux_, Packets::LinkStats::kPort, kRxModule),
       handsetTelemPort_(mux_, Packets::HandsetTelem::kPort, kVehicle),
-      startNs_(time.nowNs()), nextLinkStatsNs_(startNs_) {
+      upload_(node_, mux_), startNs_(time.nowNs()), nextLinkStatsNs_(startNs_) {
   node_.setDataSink(mux_);
 
   // Where frames must not go (design 3.3.3, the Revision 1 heartbeat rule, docs/network-mode.md "Filters"):
   //  - USB: everything may go to the ground station, except the copies addressed to the vehicle (Node::send floods
   //    a unicast frame to every link while it has no route).
-  //  - Air: no ground-station traffic at all (source node 0: its heartbeats, its RC_STATE and everything else; the
-  //    vehicle never sees the ground station over radio), nothing addressed to the ground station, no USB-only
-  //    ports (>= 0x80), and no RC_STATE that came in over USB whatever its source (the ground station's virtual
-  //    radio never reaches the vehicle).
+  //  - Air: only the ground station's HEARTBEAT is dropped (user decision 2026-11-19); its REQUESTs and every other
+  //    frame pass. Also dropped: anything addressed to the ground station (it is on USB), no USB-only ports
+  //    (>= 0x80), and no RC_STATE that came in over USB whatever its source (the Pocket is the only RC source on the
+  //    radio path).
   EgressFilter usbFilter;
   usbFilter.addDstDrop(kVehicle);
   usbIdx_ = node_.addLink(usbGuard_, usbFilter);
 
   EgressFilter airFilter;
   airFilter.portLimit = 0x80;
-  airFilter.addSrcDrop(kGroundStation);
   airFilter.addDstDrop(kGroundStation);
   if (usbIdx_ >= 0) airFilter.addRule(static_cast<uint8_t>(usbIdx_), kRcStatePort);
-  airFilter.addHeartbeatDrop(kGroundStation); // covered by the source drop; kept as a second, explicit rule
+  airFilter.addHeartbeatDrop(kGroundStation);
   airIdx_ = node_.addLink(air, airFilter);
 
   // Fixed topology: the vehicle and the RX module are always behind the air link, the ground station behind USB.
@@ -57,6 +56,7 @@ NetworkRouter::NetworkRouter(network::TimeSourceI &time, network::FrameLinkI &us
 void NetworkRouter::poll() {
   node_.poll();
   const int64_t now = time_.nowNs();
+  uploadDue_ = upload_.poll(now);
   if (now >= nextLinkStatsNs_) {
     sendOwnLinkStats(now);
     nextLinkStatsNs_ += kLinkStatsPeriodNs;

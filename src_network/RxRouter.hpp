@@ -11,6 +11,7 @@
 #include "ExVectrNetwork.hpp"
 #include "ExVectrNetwork/TimeSourceI.hpp"
 
+#include "LinkUploadCommand.hpp"
 #include "NetAirAccess.hpp"
 #include "UploadTriggers.hpp"
 
@@ -32,6 +33,11 @@ public:
   /// True once any valid stream frame has arrived from the UART host (used by the stale-UART upload trigger).
   bool uartHostSeen() const { return uart_.stats.rxOk > 0; }
 
+  /// True once an accepted link-upload command (REQUEST action 10, target 3) has been pending for its delay (the
+  /// ACK has been sent across the air by then): the application then enters upload mode. Level, set by poll().
+  bool uploadCommandDue() const { return uploadDue_; }
+  const LinkUploadCommand &uploadCommand() const { return upload_; }
+
   /// LOG_TEXT to the ground station (over the air). Text is truncated to 233 bytes.
   bool log(Packets::Severity severity, const char *text);
 
@@ -48,6 +54,9 @@ private:
   network::FrameLinkI &uart_;
   AirStatsSourceI &airStats_;
   network::Node node_;
+  network::PortMux<2> mux_;
+  LinkUploadCommand upload_;
+  bool uploadDue_ = false;
   int uartIdx_ = -1, airIdx_ = -1;
   int64_t startNs_;
   int64_t nextLinkStatsNs_;

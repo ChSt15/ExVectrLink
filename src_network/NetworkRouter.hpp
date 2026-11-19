@@ -12,6 +12,7 @@
 #include "ExVectrNetwork/TimeSourceI.hpp"
 
 #include "LinkGuard.hpp"
+#include "LinkUploadCommand.hpp"
 #include "NetAirAccess.hpp"
 #include "NetCrsf.hpp"
 
@@ -95,6 +96,11 @@ public:
   /// LOG_TEXT to the ground station (replaces the debug monitor). Text is truncated to 233 bytes.
   bool log(Packets::Severity severity, const char *text);
 
+  /// True once an accepted link-upload command (REQUEST action 10, target 2) has been pending for its delay: the
+  /// application then enters upload mode (UploadTriggers::requestCommand()). Level, set by poll().
+  bool uploadCommandDue() const { return uploadDue_; }
+  const LinkUploadCommand &uploadCommand() const { return upload_; }
+
   network::Node &node() { return node_; }
   const network::Node &node() const { return node_; }
   int usbLinkIndex() const { return usbIdx_; }
@@ -112,6 +118,8 @@ private:
   LinkGuard usbGuard_;
   network::Node node_;
   network::PortMux<8> mux_;
+  LinkUploadCommand upload_;
+  bool uploadDue_ = false;
   SourcePort<Packets::LinkStats> linkStatsPort_;     // accepted from node 3 only
   SourcePort<Packets::HandsetTelem> handsetTelemPort_; // accepted from node 1 only
   CrsfTelemetryScheduler scheduler_;

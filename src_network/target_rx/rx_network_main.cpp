@@ -12,7 +12,7 @@
 //   - button held 3 s while running: WiFi next to the link (as FPV);
 //   - 60 s sync failsafe: the air link never left Searching within 60 s of boot (link stopped);
 //   - stale UART: no valid frame from the UART host within 60 s of boot (link stopped);
-//   - network upload command: hook only (UploadTriggers::requestCommand), no packet bound yet (open point).
+//   - network upload command: REQUEST action LINK_UPLOAD_MODE (10) with target 3, always honoured (LinkUploadCommand).
 #include <Arduino.h>
 
 #include "ExVectrArduinoPlatform.hpp"
@@ -126,6 +126,7 @@ void loop() {
   uartLink.poll(); // flush what the router just queued
 
   if (triggers) {
+    if (router.uploadCommandDue()) triggers->requestCommand(); // ACK was sent 400 ms earlier
     const auto r = triggers->update(coreTime.nowNs(), netRadioLeftSearching(), router.uartHostSeen());
     if (r == UploadTriggers::Reason::SyncFailsafe) enterUploadMode("sync failsafe: no TX module for 60 s, WiFi upload");
     else if (r == UploadTriggers::Reason::UartStale) enterUploadMode("no UART host for 60 s, WiFi upload");

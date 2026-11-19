@@ -3,7 +3,7 @@
 //  - NetAirAccess with the real AirFrameLink: RC_STATE expiry at the slot start, priority order, downlink fill,
 //    receive mailbox, keep-alives, LQ, LINK_STATS derivation, superframe counter, direction.
 //  - RxRouter (node 3): egress filters, LINK_STATS 5 Hz, LQ 0 / Searching without air, no synthesised RC state.
-//  - UploadTriggers and NetPowerPolicy.
+//  - Link upload command (REQUEST action 10) on the RX module and end to end; UploadTriggers and NetPowerPolicy.
 //  - End to end: TX router (node 2) + air access <-> air access + RX router (node 3) over simulated 20 ms slots.
 // Run: ~/.platformio/penv/bin/pio test -e native
 #include <unity.h>
@@ -19,6 +19,7 @@
 
 #include "ExVectrLink/datalink/AirProfile.hpp"
 #include "ExVectrLink/datalink/FhssMath.hpp"
+#include "LinkUploadCommand.hpp"
 #include "NetAirAccess.hpp"
 #include "NetworkRouter.hpp"
 #include "RxRouter.hpp"
@@ -439,17 +440,105 @@ void test_rx_filters_from_air_to_uart() {
   RxRig r;
   r.uart.sent.clear();
   const uint8_t pl[12] = {0};
-  r.fromAir({makeHeartbeat(0, 0),                                   // ground station heartbeat
-             rcStateFrame(0, 1, 1),                                 // ground station RC_STATE
-             makeData(0, 1, 0x11, 1, pl, 12, net::wire::Qos::Event, false), // ground station REQUEST
+  r.fromAir({makeHeartbeat(0, 0),                                   // ground station heartbeat: dropped
+             rcStateFrame(0, 1, 1),                                 // ground station RC_STATE: dropped
+             makeData(0, 1, 0x11, 1, pl, 12, net::wire::Qos::Event, false), // ground station REQUEST: passes
+             makeData(0, 1, 0x20, 2, pl, 12),                       // other ground station data: passes
              rcStateFrame(2, 1, 1),                                 // the Pocket's RC_STATE via the TX module
              makeHeartbeat(2, 2)});                                 // TX module heartbeat
   TEST_ASSERT_EQUAL_INT(0, countHb(r.uart.sent, 0));
   TEST_ASSERT_EQUAL_INT(0, countData(r.uart.sent, 0x10, 0));
-  TEST_ASSERT_EQUAL_INT(0, countData(r.uart.sent, 0x11, 0));
+  TEST_ASSERT_EQUAL_INT(1, countData(r.uart.sent, 0x11, 0, 1));
+  TEST_ASSERT_EQUAL_INT(1, countData(r.uart.sent, 0x20, 0, 1));
   TEST_ASSERT_EQUAL_INT(1, countData(r.uart.sent, 0x10, 2, 1));
   TEST_ASSERT_EQUAL_INT(1, countHb(r.uart.sent, 2));
-  TEST_ASSERT_TRUE(r.router.node().stats.egressFiltered >= 3);
+  TEST_ASSERT_TRUE(r.router.node().stats.egressFiltered >= 2);
+}
+
+void test_rx_vehicle_request_ack_to_gs_goes_on_air() {
+  RxRig r;
+  Packets::RequestAck ack;
+  ack.req_id = 3;
+  uint8_t buf[Packets::RequestAck::kMaxSize];
+  size_t n = ack.encode(buf, sizeof buf);
+  r.uart.inject(makeData(1, 0, Packets::RequestAck::kPort, 1, buf, n, net::wire::Qos::Event, false));
+  r.router.poll();
+  TEST_ASSERT_EQUAL_INT(1, countData(r.toAir(), 0x12, 1, 0));
+}
+
+static Frame rxUploadRequest(uint8_t src, uint8_t dst, uint8_t seq, uint16_t reqId, uint8_t target = 3,
+                             uint8_t action = 10) {
+  Packets::Request q;
+  q.req_id = reqId;
+  q.action = action;
+  q.target = target;
+  uint8_t buf[Packets::Request::kMaxSize];
+  size_t n = q.encode(buf, sizeof buf);
+  return makeData(src, dst, Packets::Request::kPort, seq, buf, n, net::wire::Qos::Event, false);
+}
+
+void test_rx_upload_command_from_uart_and_air() {
+  { // from the UART (vehicle host): ACK back on the UART, due after the delay
+    RxRig r;
+    r.uart.inject(rxUploadRequest(1, 3, 1, 21));
+    r.router.poll();
+    TEST_ASSERT_EQUAL_INT(1, countData(r.uart.sent, 0x12, 3, 1));
+    for (auto &f : r.uart.sent)
+      if (isData(f, 0x12)) {
+        Packets::RequestAck a;
+        TEST_ASSERT_TRUE(a.decode(f.d + 6, f.len - 6));
+        TEST_ASSERT_EQUAL_UINT16(21, a.req_id);
+        TEST_ASSERT_TRUE(a.status == Packets::RequestStatus::kDone);
+        TEST_ASSERT_EQUAL_UINT8(0, a.detail);
+      }
+    TEST_ASSERT_FALSE(r.router.uploadCommandDue());
+    r.clk.t += LinkUploadCommand::kUploadDelayNs - 1000000LL;
+    r.router.poll();
+    TEST_ASSERT_FALSE(r.router.uploadCommandDue());
+    r.clk.t += 2000000LL;
+    r.router.poll();
+    TEST_ASSERT_TRUE(r.router.uploadCommandDue());
+  }
+  { // over the air (ground station through the TX module): ACK goes on the air, addressed to node 0
+    RxRig r;
+    r.fromAir({rxUploadRequest(0, 3, 1, 22)});
+    r.router.poll();
+    auto air = r.toAir();
+    TEST_ASSERT_EQUAL_INT(1, countData(air, 0x12, 3, 0));
+    TEST_ASSERT_EQUAL_INT(0, countData(r.uart.sent, 0x12));
+    TEST_ASSERT_EQUAL_INT(0, countData(r.uart.sent, 0x11)); // the command is not passed on to the vehicle
+    r.clk.t += LinkUploadCommand::kUploadDelayNs + 1000000LL;
+    r.router.poll();
+    TEST_ASSERT_TRUE(r.router.uploadCommandDue());
+  }
+}
+
+void test_rx_upload_command_idempotent_and_ignored_cases() {
+  RxRig r;
+  r.uart.inject(rxUploadRequest(1, 3, 1, 5));
+  r.router.poll();
+  const int64_t first = r.clk.t;
+  r.clk.t += 300000000LL;
+  r.uart.inject(rxUploadRequest(1, 3, 2, 5)); // retry, same id
+  r.router.poll();
+  TEST_ASSERT_EQUAL_INT(2, countData(r.uart.sent, 0x12, 3, 1)); // every copy acknowledged
+  r.clk.t = first + LinkUploadCommand::kUploadDelayNs + 1000000LL;
+  r.router.poll();
+  TEST_ASSERT_TRUE(r.router.uploadCommandDue()); // from the first copy
+  TEST_ASSERT_EQUAL_UINT32(2, r.router.uploadCommand().stats.accepted);
+
+  RxRig q;
+  const uint8_t shortPl[11] = {1, 0, 10, 3};
+  q.uart.inject(rxUploadRequest(1, 3, 1, 1, 2));        // target the TX module
+  q.uart.inject(rxUploadRequest(1, 3, 2, 2, 3, 9));     // other action
+  q.uart.inject(rxUploadRequest(1, 3, 3, 0));           // req_id 0
+  q.uart.inject(makeData(1, 3, 0x11, 4, shortPl, sizeof shortPl, net::wire::Qos::Event, false)); // too short
+  q.uart.inject(rxUploadRequest(1, 2, 5, 3, 2));        // forwarded, not for us
+  q.clk.t += 2 * LinkUploadCommand::kUploadDelayNs;
+  q.router.poll();
+  TEST_ASSERT_FALSE(q.router.uploadCommandDue());
+  TEST_ASSERT_EQUAL_INT(0, countData(q.uart.sent, 0x12));
+  TEST_ASSERT_EQUAL_UINT32(0, q.router.uploadCommand().stats.accepted);
 }
 
 void test_rx_filters_from_uart_to_air() {
@@ -659,21 +748,79 @@ void test_e2e_rc_state_reaches_uart_at_25hz() {
   TEST_ASSERT_TRUE(e.rx.node().isPresent(2));
 }
 
-void test_e2e_ground_station_never_reaches_uart() {
+void test_e2e_gs_heartbeat_and_rc_never_reach_uart_but_request_does() {
   EndToEnd e;
   const uint8_t pl[12] = {0};
   for (int i = 0; i < 100; i++) {
     e.usb.inject(makeHeartbeat(0, 0));                 // ground-station heartbeat
     e.usb.inject(rcStateFrame(0, 1, (uint8_t)i));      // virtual radio RC_STATE
     e.usb.inject(rcStateFrame(1, 1, (uint8_t)i));      // RC_STATE injected over USB with a forged source
-    e.usb.inject(makeData(0, 1, 0x11, (uint8_t)i, pl, 12, net::wire::Qos::Event, false));
+    e.usb.inject(makeData(0, 1, 0x11, (uint8_t)i, pl, 12, net::wire::Qos::Event, false)); // REQUEST
     e.run(20);
   }
   TEST_ASSERT_EQUAL_INT(0, countHb(e.uart.sent, 0));
   TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x10, 0));
   TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x10, 1));
-  TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x11, 0));
-  TEST_ASSERT_TRUE(countData(e.uart.sent, 0x10, 2) > 0); // the Pocket's state still flows
+  TEST_ASSERT_TRUE(countData(e.uart.sent, 0x11, 0, 1) > 0); // ground-station REQUESTs reach the vehicle UART
+  TEST_ASSERT_TRUE(countData(e.uart.sent, 0x10, 2) > 0);    // the Pocket's state still flows
+}
+
+void test_e2e_request_ack_from_vehicle_reaches_usb() {
+  EndToEnd e;
+  e.run(1000); // sync both routes
+  Packets::RequestAck ack;
+  ack.req_id = 11;
+  uint8_t buf[Packets::RequestAck::kMaxSize];
+  size_t n = ack.encode(buf, sizeof buf);
+  e.uart.inject(makeData(1, 0, Packets::RequestAck::kPort, 1, buf, n, net::wire::Qos::Event, false));
+  e.run(300);
+  TEST_ASSERT_EQUAL_INT(1, countData(e.usb.sent, 0x12, 1, 0));
+}
+
+void test_e2e_upload_command_to_rx_over_air_ack_before_entry() {
+  EndToEnd e;
+  e.run(1000);
+  Packets::Request q;
+  q.req_id = 600;
+  q.action = 10;
+  q.target = 3;
+  uint8_t buf[Packets::Request::kMaxSize];
+  size_t n = q.encode(buf, sizeof buf);
+  e.usb.inject(makeData(0, 3, Packets::Request::kPort, 1, buf, n, net::wire::Qos::Event, false));
+  int64_t ackNs = 0, dueNs = 0;
+  const int64_t t0 = e.clk.nowNs();
+  for (int i = 0; i < 1000; i++) {
+    const size_t u0 = e.usb.sent.size();
+    e.run(1);
+    for (size_t k = u0; k < e.usb.sent.size(); k++)
+      if (isData(e.usb.sent[k], 0x12) && e.usb.sent[k].d[3] == 3 && e.usb.sent[k].d[2] == 0 && !ackNs)
+        ackNs = e.clk.nowNs();
+    if (e.rx.uploadCommandDue() && !dueNs) dueNs = e.clk.nowNs();
+  }
+  TEST_ASSERT_TRUE(ackNs > t0);
+  TEST_ASSERT_TRUE(dueNs > ackNs);                                   // the ACK crossed the air first
+  TEST_ASSERT_TRUE(dueNs - t0 >= LinkUploadCommand::kUploadDelayNs);
+  TEST_ASSERT_FALSE(e.tx.uploadCommandDue());                        // the TX module was not the target
+  // the REQUEST for node 3 did not reach the vehicle UART
+  TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x11));
+}
+
+void test_e2e_upload_command_to_tx_acked_on_usb() {
+  EndToEnd e;
+  e.run(1000);
+  Packets::Request q;
+  q.req_id = 601;
+  q.action = 10;
+  q.target = 2;
+  uint8_t buf[Packets::Request::kMaxSize];
+  size_t n = q.encode(buf, sizeof buf);
+  e.usb.inject(makeData(0, 2, Packets::Request::kPort, 1, buf, n, net::wire::Qos::Event, false));
+  e.run(100);
+  TEST_ASSERT_EQUAL_INT(1, countData(e.usb.sent, 0x12, 2, 0));
+  TEST_ASSERT_FALSE(e.tx.uploadCommandDue());
+  e.run(400);
+  TEST_ASSERT_TRUE(e.tx.uploadCommandDue());
+  TEST_ASSERT_FALSE(e.rx.uploadCommandDue());
 }
 
 void test_e2e_pocket_off_silence_and_no_late_release() {
@@ -715,13 +862,19 @@ int main(int, char **) {
   RUN_TEST(test_direction_master_does_not_accept_master);
   RUN_TEST(test_access_no_heap_after_construction);
   RUN_TEST(test_rx_filters_from_air_to_uart);
+  RUN_TEST(test_rx_vehicle_request_ack_to_gs_goes_on_air);
+  RUN_TEST(test_rx_upload_command_from_uart_and_air);
+  RUN_TEST(test_rx_upload_command_idempotent_and_ignored_cases);
   RUN_TEST(test_rx_filters_from_uart_to_air);
   RUN_TEST(test_rx_link_stats_5hz_and_searching);
   RUN_TEST(test_rx_router_no_heap_after_construction);
   RUN_TEST(test_upload_triggers);
   RUN_TEST(test_power_policy);
   RUN_TEST(test_e2e_rc_state_reaches_uart_at_25hz);
-  RUN_TEST(test_e2e_ground_station_never_reaches_uart);
+  RUN_TEST(test_e2e_gs_heartbeat_and_rc_never_reach_uart_but_request_does);
+  RUN_TEST(test_e2e_request_ack_from_vehicle_reaches_usb);
+  RUN_TEST(test_e2e_upload_command_to_rx_over_air_ack_before_entry);
+  RUN_TEST(test_e2e_upload_command_to_tx_acked_on_usb);
   RUN_TEST(test_e2e_pocket_off_silence_and_no_late_release);
   return UNITY_END();
 }

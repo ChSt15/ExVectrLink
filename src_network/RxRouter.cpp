@@ -18,16 +18,20 @@ network::NodeConfig RxRouter::makeConfig() {
 
 RxRouter::RxRouter(network::TimeSourceI &time, network::FrameLinkI &uart, network::FrameLinkI &air,
                    AirStatsSourceI &airStats)
-    : time_(time), uart_(uart), airStats_(airStats), node_(makeConfig(), time), startNs_(time.nowNs()),
+    : time_(time), uart_(uart), airStats_(airStats), node_(makeConfig(), time), upload_(node_, mux_), startNs_(time.nowNs()),
       nextLinkStatsNs_(startNs_) {
+  node_.setDataSink(mux_);
+
   // Where frames must not go (design 3.3.3, Revision 1, docs/network-mode.md "Filters"):
-  //  - UART (to the vehicle): no ground-station traffic from the air side at all (source node 0: its heartbeats, its
-  //    RC_STATE, everything; a second layer behind the TX module's air filter), nothing addressed to the ground
-  //    station (the vehicle is an end node and never forwards), no USB-only ports.
+  //  - UART (to the vehicle): from node 0 only the heartbeat and RC_STATE are dropped (second layer behind the TX
+  //    module: no RC from the ground station over radio ever reaches the vehicle); its REQUESTs and other frames
+  //    pass. Nothing addressed to the ground station (the vehicle is an end node and never forwards), no USB-only
+  //    ports.
   //  - Air: nothing addressed to the vehicle (Node::send floods unicast frames without a route), no USB-only ports.
   EgressFilter uartFilter;
   uartFilter.portLimit = 0x80;
-  uartFilter.addSrcDrop(kGroundStation);
+  uartFilter.addHeartbeatDrop(kGroundStation);
+  uartFilter.addSrcPortDrop(kGroundStation, Packets::RcState::kPort);
   uartFilter.addDstDrop(kGroundStation);
   uartIdx_ = node_.addLink(uart, uartFilter);
 
@@ -47,6 +51,7 @@ RxRouter::RxRouter(network::TimeSourceI &time, network::FrameLinkI &uart, networ
 void RxRouter::poll() {
   node_.poll();
   const int64_t now = time_.nowNs();
+  uploadDue_ = upload_.poll(now);
   if (now >= nextLinkStatsNs_) {
     sendOwnLinkStats(now);
     nextLinkStatsNs_ += kLinkStatsPeriodNs;

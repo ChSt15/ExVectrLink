@@ -472,14 +472,14 @@ void test_filter_rc_state_from_usb_not_forwarded_to_air() {
   TEST_ASSERT_EQUAL_INT(0, a.count(0x10)); // not on the radio path
   TEST_ASSERT_TRUE(r.router.node().stats.egressFiltered >= 1);
 
-  // Since the air link task: no ground-station traffic crosses the radio towards the vehicle at all (source drop
-  // of node 0), so a REQUEST from the ground station is not forwarded either.
+  // User decision 2026-11-19: the ground station's other traffic passes over the radio: a REQUEST to the vehicle
+  // (calibration commands) crosses the air.
   Packets::Request req;
   req.req_id = 5;
   Frame g = makePacket(0, 1, 1, req, net::wire::Qos::Event, false);
   r.usb.inject(g.d, g.len);
   AirContents b = drainAir(r.air, r.clk.nowNs());
-  TEST_ASSERT_EQUAL_INT(0, b.count(0x11, 1, 0));
+  TEST_ASSERT_EQUAL_INT(1, b.count(0x11, 1, 0));
   // RC_STATE arriving over USB on behalf of another source is still dropped by the port rule (second layer).
   Frame h = makePacket(1, 1, 8, rc, net::wire::Qos::Control);
   r.usb.inject(h.d, h.len);
@@ -808,20 +808,143 @@ void test_no_heap_use_after_construction() {
   TEST_ASSERT_EQUAL_UINT32(0, (uint32_t)(g_allocs.load() - before));
 }
 
-void test_filter_no_ground_station_traffic_on_air() {
+void test_filter_only_gs_heartbeat_and_rc_state_dropped_on_air() {
   Rig r;
-  // A ground-station REQUEST to the vehicle, and a GS frame on another port: neither goes on the air.
   const uint8_t pl[12] = {1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-  Frame req = makeData(0, 1, 0x11, 1, pl, sizeof pl, net::wire::Qos::Event, false);
+  Frame req = makeData(0, 1, 0x11, 1, pl, sizeof pl, net::wire::Qos::Event, false);   // REQUEST to the vehicle
   r.usb.inject(req.d, req.len);
-  Frame other = makeData(0, 0xFF, 0x30, 1, pl, 4);
+  Frame reqRx = makeData(0, 3, 0x11, 2, pl, sizeof pl, net::wire::Qos::Event, false); // REQUEST to the RX module
+  r.usb.inject(reqRx.d, reqRx.len);
+  Frame other = makeData(0, 0xFF, 0x30, 1, pl, 4);                                    // other GS data, broadcast
   r.usb.inject(other.d, other.len);
+  Frame hb0 = makeHeartbeat(0, 0);
+  r.usb.inject(hb0.d, hb0.len);
+  Frame rc0 = makeData(0, 1, 0x10, 3, pl, 4, net::wire::Qos::Control, true);          // RC_STATE from the GS
+  r.usb.inject(rc0.d, rc0.len);
+  Frame toGs = makeData(0, 0, 0x30, 1, pl, 4);                                        // dst 0 never on air
+  r.usb.inject(toGs.d, toGs.len);
   // A frame injected over USB on behalf of the vehicle (src 1) still passes (bench test 8).
   Frame veh = makeData(1, 2, 0x30, 1, pl, 4);
   r.usb.inject(veh.d, veh.len);
   AirContents a = drainAir(r.air, r.clk.nowNs());
-  TEST_ASSERT_EQUAL_INT(0, a.count(0x11));
-  TEST_ASSERT_EQUAL_INT(0, a.count(0x30, 0xFF));
+  TEST_ASSERT_EQUAL_INT(1, a.count(0x11, 1, 0));
+  TEST_ASSERT_EQUAL_INT(1, a.count(0x11, 3, 0));
+  TEST_ASSERT_EQUAL_INT(1, a.count(0x30, 0xFF, 0));
+  TEST_ASSERT_EQUAL_INT(0, a.heartbeats(0));
+  TEST_ASSERT_EQUAL_INT(0, a.count(0x10));
+  TEST_ASSERT_EQUAL_INT(0, a.count(0x30, 0, 0));
+}
+
+void test_vehicle_request_ack_reaches_usb() {
+  Rig r;
+  Packets::RequestAck ack;
+  ack.req_id = 9;
+  Frame f = makePacket(1, 0, 4, ack, net::wire::Qos::Event, false);
+  injectFromAir(r.air, r.clk, f);
+  TEST_ASSERT_EQUAL_INT(1, countUsb(r.usb, 0x12, 0, 1));
+}
+
+// ---- link upload command (REQUEST action 10, target 2), TX module ----
+
+static Frame uploadRequest(uint8_t src, uint8_t dst, uint8_t seq, uint16_t reqId, uint8_t target = 2,
+                           uint8_t action = 10) {
+  Packets::Request q;
+  q.req_id = reqId;
+  q.action = action;
+  q.target = target;
+  return makePacket(src, dst, seq, q, net::wire::Qos::Event, false);
+}
+
+static void decodeAck(const uint8_t *d, uint8_t len, Packets::RequestAck &out) {
+  TEST_ASSERT_TRUE(out.decode(d + 6, len - 6));
+}
+
+void test_upload_cmd_from_usb_acked_then_due_after_delay() {
+  Rig r;
+  Frame q = uploadRequest(0, 2, 1, 77);
+  r.usb.inject(q.d, q.len);
+  r.router.poll();
+  TEST_ASSERT_EQUAL_INT(1, countUsb(r.usb, 0x12, 0, 2)); // ACK addressed to the requester (dst 0, src 2)
+  for (auto &i : r.usb.sent)
+    if (isData(i.d, i.len, 0x12)) {
+      Packets::RequestAck a;
+      decodeAck(i.d, i.len, a);
+      TEST_ASSERT_EQUAL_UINT16(77, a.req_id);
+      TEST_ASSERT_TRUE(a.status == Packets::RequestStatus::kDone);
+      TEST_ASSERT_EQUAL_UINT8(0, a.detail);
+    }
+  TEST_ASSERT_FALSE(r.router.uploadCommandDue());
+  r.clk.t += LinkUploadCommand::kUploadDelayNs - 1000000LL;
+  r.router.poll();
+  TEST_ASSERT_FALSE(r.router.uploadCommandDue());
+  r.clk.t += 2000000LL;
+  r.router.poll();
+  TEST_ASSERT_TRUE(r.router.uploadCommandDue());
+  // honoured always: nothing but the command was needed (no arm / ground state exists in the module)
+  TEST_ASSERT_TRUE(LinkUploadCommand::kUploadDelayNs >= 300000000LL && LinkUploadCommand::kUploadDelayNs <= 500000000LL);
+}
+
+void test_upload_cmd_from_air_acked_to_air() {
+  Rig r;
+  Frame q = uploadRequest(1, 2, 1, 5); // any link: here over the air, from the vehicle side
+  injectFromAir(r.air, r.clk, q);
+  r.router.poll();
+  AirContents a = drainAir(r.air, r.clk.nowNs());
+  TEST_ASSERT_EQUAL_INT(1, a.count(0x12, 1, 2));
+  TEST_ASSERT_EQUAL_INT(0, countUsb(r.usb, 0x12)); // not to USB
+  r.clk.t += LinkUploadCommand::kUploadDelayNs + 1000000LL;
+  r.router.poll();
+  TEST_ASSERT_TRUE(r.router.uploadCommandDue());
+}
+
+void test_upload_cmd_repeat_is_idempotent_and_each_copy_acked() {
+  Rig r;
+  Frame q1 = uploadRequest(0, 2, 1, 42);
+  r.usb.inject(q1.d, q1.len);
+  r.router.poll();
+  const int64_t first = r.clk.t;
+  r.clk.t += 300000000LL; // a retry 300 ms later must not restart the delay
+  Frame q2 = uploadRequest(0, 2, 2, 42);
+  r.usb.inject(q2.d, q2.len);
+  r.router.poll();
+  TEST_ASSERT_EQUAL_INT(2, countUsb(r.usb, 0x12, 0, 2));
+  r.clk.t = first + LinkUploadCommand::kUploadDelayNs + 1000000LL;
+  r.router.poll();
+  TEST_ASSERT_TRUE(r.router.uploadCommandDue()); // due from the FIRST copy
+  TEST_ASSERT_EQUAL_UINT32(2, r.router.uploadCommand().stats.accepted);
+}
+
+void test_upload_cmd_ignored_for_other_target_action_and_malformed() {
+  Rig r;
+  Frame wrongTarget = uploadRequest(0, 2, 1, 1, 3);       // target the RX module, delivered here
+  Frame wrongAction = uploadRequest(0, 2, 2, 2, 2, 9);    // SYSTEM_RESET for us
+  Frame zeroId = uploadRequest(0, 2, 3, 0);               // req_id 0 is invalid
+  const uint8_t shortPl[11] = {1, 0, 10, 2};              // shorter than the fixed Request size
+  Frame shortReq = makeData(0, 2, 0x11, 4, shortPl, sizeof shortPl, net::wire::Qos::Event, false);
+  Frame fromVehicleOtherTarget = uploadRequest(1, 2, 5, 9, 1);
+  for (const Frame *f : {&wrongTarget, &wrongAction, &zeroId, &shortReq, &fromVehicleOtherTarget}) r.usb.inject(f->d, f->len);
+  r.clk.t += 2 * LinkUploadCommand::kUploadDelayNs;
+  r.router.poll();
+  TEST_ASSERT_FALSE(r.router.uploadCommandDue());
+  TEST_ASSERT_EQUAL_INT(0, countUsb(r.usb, 0x12));
+  TEST_ASSERT_EQUAL_UINT32(0, r.router.uploadCommand().stats.accepted);
+  // a heartbeat or telemetry never triggers it either
+  Frame hb = makeHeartbeat(0, 0);
+  r.usb.inject(hb.d, hb.len);
+  r.router.poll();
+  TEST_ASSERT_FALSE(r.router.uploadCommandDue());
+  TEST_ASSERT_FALSE(r.router.uploadCommand().pending());
+}
+
+void test_upload_cmd_for_rx_module_is_forwarded_not_executed() {
+  Rig r;
+  Frame q = uploadRequest(0, 3, 1, 8, 3);
+  r.usb.inject(q.d, q.len);
+  AirContents a = drainAir(r.air, r.clk.nowNs());
+  TEST_ASSERT_EQUAL_INT(1, a.count(0x11, 3, 0)); // forwarded to the RX module over the air
+  r.clk.t += 2 * LinkUploadCommand::kUploadDelayNs;
+  r.router.poll();
+  TEST_ASSERT_FALSE(r.router.uploadCommandDue());
 }
 
 void test_tx_link_stats_carry_air_access_counters() {
@@ -882,7 +1005,13 @@ int main() {
   RUN_TEST(test_router_stale_vehicle_telemetry_not_shown);
   RUN_TEST(test_log_text_goes_to_usb_not_air);
   RUN_TEST(test_no_heap_use_after_construction);
-  RUN_TEST(test_filter_no_ground_station_traffic_on_air);
+  RUN_TEST(test_filter_only_gs_heartbeat_and_rc_state_dropped_on_air);
+  RUN_TEST(test_vehicle_request_ack_reaches_usb);
+  RUN_TEST(test_upload_cmd_from_usb_acked_then_due_after_delay);
+  RUN_TEST(test_upload_cmd_from_air_acked_to_air);
+  RUN_TEST(test_upload_cmd_repeat_is_idempotent_and_each_copy_acked);
+  RUN_TEST(test_upload_cmd_ignored_for_other_target_action_and_malformed);
+  RUN_TEST(test_upload_cmd_for_rx_module_is_forwarded_not_executed);
   RUN_TEST(test_tx_link_stats_carry_air_access_counters);
   return UNITY_END();
 }
