@@ -7,8 +7,9 @@ namespace VCTR::ExVectrLink::netmode {
 /// The receiver's (and TX module's) automatic WiFi-upload triggers, as kept by the workspace design (Revision 1):
 ///  - sync failsafe: the air link never left Searching within 60 s of boot (reaching Syncing once cancels it for
 ///    good, exactly as the FPV SyncFailsafeMonitor);
-///  - stale UART (receiver only): no valid stream frame from the UART host within 60 s of boot (seeing one once
-///    cancels it for good, so a host that goes quiet later, for example in flight, never stops the link);
+///  - stale UART (receiver only): neither a valid stream frame from the UART host nor the air link (left Searching)
+///    within 60 s of boot (either one seen once cancels it for good, so a host that goes quiet later, for example in
+///    flight, never stops the link; a receiver reached over the air stays up and can take the upload command);
 ///  - a command: requestCommand() (called by the main loop once LinkUploadCommand reports the REQUEST action 10 due,
 ///    docs/network-mode.md "Link upload command").
 /// Each fires at most once. Entering upload mode stops the link until reset.
@@ -29,7 +30,7 @@ public:
     Reason r = Reason::None;
     if (command_) r = Reason::Command;
     else if (!synced_ && nowNs - boot_ >= kTimeoutNs) r = Reason::SyncFailsafe;
-    else if (useUart_ && !hostSeen_ && nowNs - boot_ >= kTimeoutNs) r = Reason::UartStale;
+    else if (useUart_ && !hostSeen_ && !synced_ && nowNs - boot_ >= kTimeoutNs) r = Reason::UartStale;
     fired_ = r;
     return r;
   }
