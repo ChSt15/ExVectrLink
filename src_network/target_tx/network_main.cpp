@@ -4,9 +4,11 @@
 // DebugMonitor, no Core::initialise() (its print hooks would write to Serial). Logs are LOG_TEXT packets.
 // The CRSF half-duplex port to the handset is the same one the FPV firmware uses (400 kBaud, inverted, shared pin),
 // driven through src/CRSF.cpp.
-// The air side is the FHSS air link (air profile v1, src_network/target/NetRadio.cpp) with diversity on both radios
-// and dynamic power fed by the vehicle receiver's LINK_STATS (node 3). Power limits and the TX antenna come from the
-// same EEPROM settings as the FPV firmware (read only here; there is no Lua menu in this firmware).
+// The air side is the FHSS air link (air profile v1, src_network/target/NetRadio.cpp) with diversity on both radios.
+// ONE manual power setting for the whole network (no dynamic power): 10 dBm (10 mW legal limit) at every boot, raised
+// temporarily (RAM only) from the Lua menu up to the board maximum, applied to both radios and broadcast to the ship
+// radio node as LINK_CONFIG (src_network/NetPower.hpp). The initial TX antenna comes from the FPV EEPROM settings
+// (read only); the Lua menu (src_network/NetLuaMenu.hpp) changes it in RAM only.
 // WiFi upload (over-the-air firmware update) as in FPV: boot button held at power-up (link never starts), button
 // held 3 s while running (WiFi next to the link), and the 60 s sync failsafe (link stopped). USB flashing works as
 // before.
@@ -17,13 +19,14 @@
 #include "ExVectrArduinoPlatform.hpp"
 
 #include "CRSF.hpp"
-#include "ExVectrLink/datalink/DynamicPower.hpp"
 #include "ExVectrPackets/crsf/packets/CRSFPackets.hpp"
 #include "Hardware.hpp"
 #include "Settings.hpp"
 #include "WifiUpload.hpp"
 
 #include "NetAirAccess.hpp"
+#include "NetLuaMenu.hpp"
+#include "NetPower.hpp"
 #include "NetRadio.hpp"
 #include "NetworkRouter.hpp"
 #include "UploadTriggers.hpp"
@@ -39,6 +42,10 @@ using namespace VCTR::ExVectrLink::netmode;
 namespace {
 
 constexpr uint32_t kCrsfBaud = 400000;
+constexpr uint8_t CRSF_ADDRESS_BROADCAST = 0x00;
+constexpr uint8_t CRSF_ADDRESS_RADIO_TRANSMITTER = 0xEA; // the handset
+constexpr uint8_t CRSF_ADDRESS_CRSF_TRANSMITTER = 0xEE;  // this module
+constexpr uint8_t CRSF_ADDRESS_ELRS_LUA = 0xEF;
 
 /// USB CDC as a non-blocking byte stream. Writes never exceed what the CDC buffer accepts, and the transmit
 /// timeout is 0 so a missing host can never stall the loop.
@@ -95,29 +102,106 @@ NetworkRouter router(coreTime, usbLink, &usbGate, airLink, airAccess);
 HardwareSerial linkSerialPort(1);
 CRSF crsf(linkSerialPort, CRSFDuplex::Half, kCrsfBaud, HardwareConfig::serialRx, 1, true);
 
-datalink::DynamicPower dynamicPower;
-NetPowerPolicy powerPolicy;
+NetTxPowerSetting txPower(HardwareConfig::sx1280AMaxPower); // RAM only, boots at 10 dBm, ceiling = board maximum
+uint8_t txAntennaSel = 0; // 0 Auto, 1 A, 2 B (RAM only)
+NetLuaMenu luaMenu(HardwareConfig::sx1280AMaxPower);
 UploadTriggers *triggers = nullptr;
+int64_t routerRebootAtNs = 0; // Lua "Reboot router" confirmed: restart at this time (0 = none)
 
 bool hostWasConnected = false;
 bool linkStopped = false; // WiFi upload mode with the link stopped (until reset)
 
-void applyPower() { netRadioSetTxPower(dynamicPower.getPower()); }
+/// The single power variable: applied to both radios and broadcast as LINK_CONFIG. Only variable writes (no radio
+/// command), so it is safe in the main loop.
+void applyPower() {
+  netRadioSetTxPower(txPower.get());
+  router.setConfigPower(txPower.get());
+}
 
-/// Power limits and TX antenna from the FPV settings record (read only; defaults on a fresh device).
+void setTxAntennaSelection(uint8_t sel) {
+  auto &div = netDiversity();
+  const size_t idx = sel == 0 ? datalink::Sx1280Diversity::kAutoTxLink : static_cast<size_t>(sel - 1);
+  if (div.setDesignatedTxLinkIndex(idx)) {
+    txAntennaSel = sel;
+  } else {
+    div.setDesignatedTxLinkIndex(datalink::Sx1280Diversity::kAutoTxLink);
+    txAntennaSel = 0;
+  }
+}
+
+/// Initial TX antenna from the FPV settings record (read only; default Auto on a fresh device).
 void applyStoredRfSettings() {
   setupSettings();
   const RFSettings &rf = getSettings().get<RFSettings>();
-  dynamicPower.setMaxPower(HardwareConfig::sx1280AMaxPower);
-  dynamicPower.setMinPower(10);
-  dynamicPower.setDynMinPower(rf.dynMinPowerDbm);
-  dynamicPower.setDynMaxPower(rf.dynMaxPowerDbm);
-  dynamicPower.setEnableDynamicPower(rf.dynamicPowerEnabled);
-  dynamicPower.setPower(dynamicPower.getDynMaxPower()); // start at the ceiling, as FPV
-  auto &div = netDiversity();
-  const size_t idx = rf.txAntenna == RFSettings::kDiversityTxAntenna ? datalink::Sx1280Diversity::kAutoTxLink
-                                                                     : static_cast<size_t>(rf.txAntenna);
-  if (!div.setDesignatedTxLinkIndex(idx)) div.setDesignatedTxLinkIndex(datalink::Sx1280Diversity::kAutoTxLink);
+  setTxAntennaSelection(rf.txAntenna == RFSettings::kDiversityTxAntenna ? 0 : static_cast<uint8_t>(rf.txAntenna + 1));
+}
+
+/// What the Lua menu does to the firmware.
+class LuaActions : public LuaMenuActions {
+public:
+  void setTxPower(int8_t dbm) override {
+    txPower.set(dbm);
+    applyPower();
+  }
+  void setTxAntenna(uint8_t selection) override { setTxAntennaSelection(selection); }
+  void rebootRouter() override { routerRebootAtNs = coreTime.nowNs() + 500000000LL; } // the reply leaves first
+  void rebootShipNode() override { router.requestShipReboot(); }
+};
+LuaActions luaActions;
+
+/// Snapshot for the Lua menu (one localAirStats() call, bounded).
+LuaMenuStatus luaStatus() {
+  LuaMenuStatus st;
+  const LocalAirStats local = airAccess.localAirStats();
+  st.txPowerDbm = txPower.get();
+  st.txAntennaSel = txAntennaSel;
+  st.airState = local.airState;
+  st.rxLq = local.rxLq;
+  const auto &port = router.linkStatsPort();
+  st.shipValid = router.node().isPresent(NetworkRouter::kRxModule) && port.hasValue() &&
+                 coreTime.nowNs() - port.rxNs() < CrsfTelemetryScheduler::kStaleNs;
+  st.shipPowerDbm = st.shipValid ? port.value().tx_power : 0;
+  return st;
+}
+
+/// One Lua parameter frame (ping, read or write), at most one per main-loop pass, never blocks.
+void handleLuaFrame(uint8_t type) {
+  using namespace VCTR::packets::crsf;
+  const int64_t now = coreTime.nowNs();
+  CrsfFrame reply;
+  if (type == static_cast<uint8_t>(CRSFFrameType::ParameterPing)) {
+    // The handset pings (~250/s) and sends no channels until the module answers with its device info.
+    CRSF::ReceivedPacket<CRSFPacket_ParameterPing> ping;
+    if (!crsf.read(ping) || !NetLuaMenu::pingIsForUs(ping.packet.destAddress)) return;
+    CRSFPacket_ParameterDeviceInfo info;
+    info.destAddress = NetLuaMenu::replyDest(ping.packet.origAddress);
+    strncpy(info.deviceName, "ExVectr Router", sizeof(info.deviceName) - 1);
+    info.parametersTotal = NetLuaMenu::kParamCount;
+    crsf.write(info);
+  } else if (type == static_cast<uint8_t>(CRSFFrameType::ParameterRead)) {
+    CRSF::ReceivedPacket<CRSFPacket_ParameterRead> rd;
+    if (!crsf.read(rd)) return;
+    if (luaMenu.buildRead(rd.packet.parameterNumber, rd.packet.origAddress, luaStatus(), now, reply))
+      crsf.write(RawCrsfFrame(reply));
+  } else if (type == static_cast<uint8_t>(CRSFFrameType::ParameterWrite)) {
+    CRSF::ReceivedPacket<CRSFPacket_ParameterWrite> wr;
+    if (!crsf.read(wr)) return;
+    if (wr.packet.parameterNumber == 0) {
+      // The ELRS Lua writes parameter 0 about once a second and expects the 0x2E status (title bar counter, icon).
+      const LuaMenuStatus st = luaStatus();
+      CRSFPacket_ElrsStatus es;
+      es.destAddress = NetLuaMenu::replyDest(wr.packet.origAddress);
+      es.pktsGood = st.rxLq;
+      es.pktsBad = static_cast<uint8_t>(100 - st.rxLq);
+      es.flags = st.shipValid ? 0x01 : 0x00;
+      es.info[0] = '\0';
+      crsf.write(es);
+      return;
+    }
+    if (luaMenu.handleWrite(wr.packet.parameterNumber, wr.packet.commandStatus, wr.packet.origAddress, luaStatus(),
+                            now, luaActions, reply))
+      crsf.write(RawCrsfFrame(reply));
+  }
 }
 
 void enterUploadMode(const char *why) {
@@ -125,6 +209,14 @@ void enterUploadMode(const char *why) {
   usbLink.poll();
   linkStopped = true;
   WifiUpload::startWiFiUploadMode(); // removes every scheduler task except WiFi: FHSS stops
+}
+
+/// LINK_REBOOT: the ACK left 400 ms ago (router.poll() + usbLink.poll()); clean software restart.
+void rebootNow(const char *why) {
+  router.log(Packets::Severity::kWarning, why);
+  usbLink.poll();
+  delay(20); // let the USB log line drain
+  ESP.restart();
 }
 
 } // namespace
@@ -150,19 +242,8 @@ void setup() {
 
   WifiUpload::initWifiUpload();
   applyStoredRfSettings();
-  netRadioSetup(/*isRxSide=*/false, airAccess, dynamicPower.getPower());
+  netRadioSetup(/*isRxSide=*/false, airAccess, txPower.get());
   applyPower();
-
-  // Per RX slot: power one step up after 2 lost RX slots in a row or while node 3's LINK_STATS is stale.
-  netFhss().addSlotHandler([](datalink::FHSSSlotEvent ev, bool isRxSlot, bool received, datalink::FHSSState) {
-    if (ev != datalink::FHSSSlotEvent::SlotEnd || !isRxSlot) return;
-    const auto &port = router.linkStatsPort();
-    const bool fresh = NetPowerPolicy::remoteFresh(port.hasValue(), port.rxNs(), coreTime.nowNs());
-    if (powerPolicy.onRxSlotEnd(received, fresh) && dynamicPower.isDynamicPowerEnabled()) {
-      dynamicPower.incPower();
-    }
-    applyPower();
-  });
 
   static UploadTriggers t(coreTime.nowNs(), /*useUartTrigger=*/false);
   triggers = &t;
@@ -181,10 +262,11 @@ void loop() {
 
   // Host attach edge: announce ourselves once as LOG_TEXT (a dropped frame while no host is attached is fine).
   const bool host = static_cast<bool>(Serial);
-  if (host && !hostWasConnected) router.log(Packets::Severity::kInfo, "tx network router up");
+  if (host && !hostWasConnected) router.log(Packets::Severity::kInfo, "Router up");
   hostWasConnected = host;
 
   crsf.available();
+  bool paramHandled = false;
   while (crsf.peekFrameType() != 0) {
     if (crsf.peekFrameType() ==
         static_cast<uint8_t>(VCTR::packets::crsf::CRSFFrameType::RcChannelsPacked)) {
@@ -197,22 +279,27 @@ void loop() {
         continue;
       }
     }
-    crsf.discardFrame(); // Lua parameter traffic etc. is not handled in network mode
+    const uint8_t t = crsf.peekFrameType();
+    if (t == static_cast<uint8_t>(VCTR::packets::crsf::CRSFFrameType::ParameterPing) ||
+        t == static_cast<uint8_t>(VCTR::packets::crsf::CRSFFrameType::ParameterRead) ||
+        t == static_cast<uint8_t>(VCTR::packets::crsf::CRSFFrameType::ParameterWrite)) {
+      if (paramHandled) break; // at most one Lua frame per pass (docs/rf-timing-audit.md); the rest wait in the queue
+      paramHandled = true;
+      handleLuaFrame(t);
+      continue;
+    }
+    crsf.discardFrame(); // anything else is not handled in network mode
   }
 
   airAccess.process(); // received air packet -> frames -> router
-  airAccess.setStatus(netRadioStatus(dynamicPower.getPower()));
-
-  // Dynamic power from every new LINK_STATS of the vehicle receiver (node 3).
-  const auto &port = router.linkStatsPort();
-  if (port.hasValue() && powerPolicy.newRemoteStats(port.rxNs()) && dynamicPower.isDynamicPowerEnabled()) {
-    const auto &ls = port.value();
-    dynamicPower.update(true, ls.rssi, ls.snr, ls.rx_lq);
-    applyPower();
-  }
+  airAccess.setStatus(netRadioStatus(txPower.get())); // LINK_STATS tx_power and the CRSF power index = what is in use
 
   router.poll();
   usbLink.poll(); // flush what the router just queued
+
+  if (router.rebootCommandDue() && !linkStopped) rebootNow("reboot command (LINK_REBOOT)"); // ACK left above
+  if (routerRebootAtNs != 0 && coreTime.nowNs() >= routerRebootAtNs && !linkStopped)
+    rebootNow("reboot router (Lua menu)");
 
   if (triggers) {
     if (router.uploadCommandDue()) triggers->requestCommand(); // ACK left in router.poll() + usbLink.poll() above

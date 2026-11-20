@@ -68,9 +68,9 @@ void configureRadio(sx::Sx1280_Direct &radio, int maxPower, int paDbm, int8_t po
   radio.setPacketMode(sx::SX1280_PacketMode::Fixed); // implicit header, exactly 255 bytes, no length prefix
   radio.setFixedPacketLength(p.fixedFrameLength);
   radio.setChannel(0);
-  radio.setTxMaxPower(maxPower);
+  radio.setTxMaxPower(maxPower); // board maximum = the runtime ceiling; the power in use is set separately
   radio.setPAdbm(paDbm);
-  radio.setTxPower(power);
+  radio.setTxPower(clampNetPower(power, maxPower));
 }
 
 } // namespace
@@ -134,6 +134,7 @@ void netRadioLoop() {
 }
 
 void netRadioSetTxPower(int8_t dbm) {
+  dbm = clampNetPower(dbm, HardwareConfig::sx1280AMaxPower);
   datalink::getDatalinkRadioA().setTxPower(dbm);
 #if defined(HAS_DIVERSITY)
   datalink::getDatalinkRadioB().setTxPower(dbm);

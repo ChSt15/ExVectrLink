@@ -20,9 +20,8 @@ NetworkRouter::NetworkRouter(network::TimeSourceI &time, network::FrameLinkI &us
                              LinkGateI *usbGate, network::FrameLinkI &air,
                              AirStatsSourceI &airStats)
     : time_(time), airStats_(airStats), usbGuard_(usb, usbGate), node_(makeConfig(), time),
-      linkStatsPort_(mux_, Packets::LinkStats::kPort, kRxModule),
-      handsetTelemPort_(mux_, Packets::HandsetTelem::kPort, kVehicle),
-      upload_(node_, mux_), startNs_(time.nowNs()), nextLinkStatsNs_(startNs_) {
+      upload_(node_, mux_), linkStatsPort_(mux_, Packets::LinkStats::kPort, kRxModule),
+      handsetTelemPort_(mux_, Packets::HandsetTelem::kPort, kVehicle), shipReboot_(node_, mux_), startNs_(time.nowNs()), nextLinkStatsNs_(startNs_) {
   node_.setDataSink(mux_);
 
   // Where frames must not go (design 3.3.3, the Revision 1 heartbeat rule, docs/network-mode.md "Filters"):
@@ -39,7 +38,12 @@ NetworkRouter::NetworkRouter(network::TimeSourceI &time, network::FrameLinkI &us
   EgressFilter airFilter;
   airFilter.portLimit = 0x80;
   airFilter.addDstDrop(kGroundStation);
-  if (usbIdx_ >= 0) airFilter.addRule(static_cast<uint8_t>(usbIdx_), kRcStatePort);
+  if (usbIdx_ >= 0) {
+    airFilter.addRule(static_cast<uint8_t>(usbIdx_), kRcStatePort);
+    // LINK_CONFIG only travels Router -> air: the ground station can never inject it (it raises the ship node's
+    // transmit power; docs/known-issues.md).
+    airFilter.addRule(static_cast<uint8_t>(usbIdx_), Packets::LinkConfig::kPort);
+  }
   airFilter.addHeartbeatDrop(kGroundStation);
   airIdx_ = node_.addLink(air, airFilter);
 
@@ -56,7 +60,9 @@ NetworkRouter::NetworkRouter(network::TimeSourceI &time, network::FrameLinkI &us
 void NetworkRouter::poll() {
   node_.poll();
   const int64_t now = time_.nowNs();
-  uploadDue_ = upload_.poll(now);
+  upload_.poll(now);
+  shipReboot_.poll(now);
+  if (haveConfig_ && now >= nextLinkConfigNs_) sendLinkConfig(now);
   if (now >= nextLinkStatsNs_) {
     sendOwnLinkStats(now);
     nextLinkStatsNs_ += kLinkStatsPeriodNs;
@@ -70,6 +76,20 @@ void NetworkRouter::sendOwnLinkStats(int64_t now) {
   uint8_t buf[Packets::LinkStats::kMaxSize];
   const size_t n = ls.encode(buf, sizeof buf);
   if (n) node_.send(network::kBroadcastAddr, Packets::LinkStats::kPort, buf, n, Qos::Link, true);
+}
+
+/// LINK_CONFIG (port 0x04): the Router's power setting as continuously repeated, latest-wins link state to the
+/// ship radio node, about 2 Hz, never as a one-shot event.
+void NetworkRouter::sendLinkConfig(int64_t now) {
+  Packets::LinkConfig lc;
+  lc.tx_power_dbm = configPowerDbm_;
+  lc.flags = 0;
+  uint8_t buf[Packets::LinkConfig::kMaxSize];
+  const size_t n = lc.encode(buf, sizeof buf);
+  // Queue full: retry shortly (the next period would also do; the receiver tolerates 10 s of silence).
+  nextLinkConfigNs_ = now + (n && node_.send(kRxModule, Packets::LinkConfig::kPort, buf, n, Qos::Link, true)
+                                  ? kLinkConfigPeriodNs
+                                  : 50000000LL);
 }
 
 void NetworkRouter::onCrsfRcFrame(const uint16_t *channels) {

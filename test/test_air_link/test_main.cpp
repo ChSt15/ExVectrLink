@@ -21,6 +21,8 @@
 #include "ExVectrLink/datalink/FhssMath.hpp"
 #include "LinkUploadCommand.hpp"
 #include "NetAirAccess.hpp"
+#include "NetLuaMenu.hpp"
+#include "NetPower.hpp"
 #include "NetworkRouter.hpp"
 #include "RxRouter.hpp"
 
@@ -513,6 +515,46 @@ void test_rx_upload_command_from_uart_and_air() {
   }
 }
 
+void test_rx_reboot_command_from_uart_and_air_idempotent() {
+  { // from the UART: ACK, then due after the delay; upload not due
+    RxRig r;
+    r.uart.inject(rxUploadRequest(1, 3, 1, 61, 3, 11));
+    r.uart.inject(rxUploadRequest(1, 3, 2, 61, 3, 11)); // retry, same id
+    r.router.poll();
+    const int64_t first = r.clk.nowNs();
+    TEST_ASSERT_EQUAL_INT(2, countData(r.uart.sent, 0x12, 3, 1));
+    TEST_ASSERT_FALSE(r.router.rebootCommandDue());
+    r.clk.t = first + LinkCommand::kDelayNs - 1000000LL;
+    r.router.poll();
+    TEST_ASSERT_FALSE(r.router.rebootCommandDue());
+    r.clk.t += 2000000LL;
+    r.router.poll();
+    TEST_ASSERT_TRUE(r.router.rebootCommandDue());
+    TEST_ASSERT_FALSE(r.router.uploadCommandDue());
+  }
+  { // over the air: ACK on the air to node 0, not passed to the vehicle
+    RxRig r;
+    r.fromAir({rxUploadRequest(0, 3, 1, 62, 3, 11)});
+    r.router.poll();
+    TEST_ASSERT_EQUAL_INT(1, countData(r.toAir(), 0x12, 3, 0));
+    TEST_ASSERT_EQUAL_INT(0, countData(r.uart.sent, 0x11));
+    r.clk.t += LinkCommand::kDelayNs + 1000000LL;
+    r.router.poll();
+    TEST_ASSERT_TRUE(r.router.rebootCommandDue());
+  }
+  { // wrong target, req_id 0, unknown action: ignored, no ACK
+    RxRig q;
+    q.uart.inject(rxUploadRequest(1, 3, 1, 1, 2, 11));
+    q.uart.inject(rxUploadRequest(1, 3, 2, 0, 3, 11));
+    q.uart.inject(rxUploadRequest(1, 3, 3, 4, 3, 12));
+    q.router.poll();
+    q.clk.t += 2 * LinkCommand::kDelayNs;
+    q.router.poll();
+    TEST_ASSERT_FALSE(q.router.rebootCommandDue());
+    TEST_ASSERT_EQUAL_INT(0, countData(q.uart.sent, 0x12));
+  }
+}
+
 void test_rx_upload_command_idempotent_and_ignored_cases() {
   RxRig r;
   r.uart.inject(rxUploadRequest(1, 3, 1, 5));
@@ -627,8 +669,12 @@ void test_upload_triggers() {
   }
   {
     UploadTriggers t(boot, true);
-    t.update(boot + 1000000000LL, true, false);
-    TEST_ASSERT_EQUAL_INT((int)R::UartStale, (int)t.update(boot + 60000000000LL, false, false));
+    t.update(boot + 1000000000LL, true, false); // air link seen, no UART host: stays up (user 2026-11-20)
+    TEST_ASSERT_EQUAL_INT((int)R::None, (int)t.update(boot + 60000000000LL, false, false));
+  }
+  {
+    UploadTriggers t(boot, true); // no UART host, air link never seen: sync failsafe wins at 60 s
+    TEST_ASSERT_EQUAL_INT((int)R::SyncFailsafe, (int)t.update(boot + 60000000000LL, false, false));
   }
   {
     UploadTriggers t(boot, false); // TX module: no UART trigger
@@ -843,6 +889,492 @@ void test_e2e_pocket_off_silence_and_no_late_release() {
   TEST_ASSERT_TRUE(e.rcOnUart - rcAtEnd <= 2); // only fresh states, one per uplink slot
 }
 
+
+// =========================================================================================== power policy, LINK_CONFIG, Lua menu
+
+static Frame linkConfigFrame(uint8_t src, uint8_t dst, uint8_t seq, int8_t dbm) {
+  Packets::LinkConfig lc;
+  lc.tx_power_dbm = dbm;
+  lc.flags = 0;
+  uint8_t buf[Packets::LinkConfig::kMaxSize];
+  const size_t n = lc.encode(buf, sizeof buf);
+  return makeData(src, dst, Packets::LinkConfig::kPort, seq, buf, n, net::wire::Qos::Link, true);
+}
+
+void test_link_config_packet_bytes() {
+  Packets::LinkConfig lc;
+  lc.tx_power_dbm = -3;
+  lc.flags = 5;
+  uint8_t buf[Packets::LinkConfig::kMaxSize];
+  TEST_ASSERT_EQUAL_UINT32(2, (uint32_t)lc.encode(buf, sizeof buf));
+  TEST_ASSERT_EQUAL_HEX8(0xFD, buf[0]);
+  TEST_ASSERT_EQUAL_HEX8(0x05, buf[1]);
+  Packets::LinkConfig d;
+  TEST_ASSERT_TRUE(d.decode(buf, 2));
+  TEST_ASSERT_EQUAL_INT8(-3, d.tx_power_dbm);
+  TEST_ASSERT_EQUAL_UINT8(5, d.flags);
+  TEST_ASSERT_EQUAL_UINT8(0x04, Packets::LinkConfig::kPort);
+  TEST_ASSERT_FALSE(d.decode(buf, 1)); // too short
+}
+
+void test_power_default_and_ceiling_clamp() {
+  TEST_ASSERT_EQUAL_INT8(10, kNetTxPowerDefaultDbm);
+  NetTxPowerSetting router(27);
+  TEST_ASSERT_EQUAL_INT8(10, router.get());     // boots at the legal 10 dBm
+  TEST_ASSERT_EQUAL_INT8(27, router.set(27));
+  TEST_ASSERT_EQUAL_INT8(27, router.set(40));   // above the board maximum: clamped
+  TEST_ASSERT_EQUAL_INT8(0, router.set(-5));    // never below 0
+  router.set(20);
+  router.reset();
+  TEST_ASSERT_EQUAL_INT8(10, router.get());
+  NetTxPowerSetting ship(12);
+  TEST_ASSERT_EQUAL_INT8(10, ship.get());
+  TEST_ASSERT_EQUAL_INT8(12, ship.set(27));
+  NetTxPowerSetting tiny(8);                    // board below the default: default is clamped too
+  TEST_ASSERT_EQUAL_INT8(8, tiny.get());
+  TEST_ASSERT_EQUAL_INT8(10, clampNetPower(10, 27));
+  TEST_ASSERT_EQUAL_INT8(0, clampNetPower(10, -1));
+}
+
+void test_link_config_follower_apply_and_failsafe() {
+  LinkConfigFollower f(12);
+  const int64_t t0 = 5000000000LL;
+  TEST_ASSERT_FALSE(f.fresh(t0));
+  TEST_ASSERT_EQUAL_INT8(10, f.power(t0));                 // never received: default
+  f.onLinkConfig(27, t0);                                  // above the ship board maximum
+  TEST_ASSERT_EQUAL_INT8(12, f.power(t0));                 // clamped to the board maximum
+  f.onLinkConfig(5, t0 + 1000000000LL);
+  TEST_ASSERT_EQUAL_INT8(5, f.power(t0 + 1000000000LL));   // lower than the default is honoured
+  f.onLinkConfig(-20, t0 + 2000000000LL);
+  TEST_ASSERT_EQUAL_INT8(0, f.power(t0 + 2000000000LL));   // never below 0
+  const int64_t last = t0 + 3000000000LL;
+  f.onLinkConfig(12, last);
+  TEST_ASSERT_EQUAL_INT8(12, f.power(last + LinkConfigFollower::kTimeoutNs - 1));
+  TEST_ASSERT_TRUE(f.fresh(last + LinkConfigFollower::kTimeoutNs - 1));
+  TEST_ASSERT_EQUAL_INT8(10, f.power(last + LinkConfigFollower::kTimeoutNs)); // 10 s: back to 10 dBm
+  TEST_ASSERT_FALSE(f.fresh(last + LinkConfigFollower::kTimeoutNs));
+  f.onLinkConfig(12, last + 20000000000LL);                // a new copy brings it back
+  TEST_ASSERT_EQUAL_INT8(12, f.power(last + 20000000000LL));
+}
+
+struct TxRig {
+  FakeClock clk;
+  RecordLink usb{clk};
+  RecordLink air{clk};
+  Gate gate;
+  StubAirStats stats;
+  NetworkRouter router{clk, usb, &gate, air, stats};
+};
+
+void test_tx_router_sends_link_config_continuously() {
+  TxRig r;
+  r.router.poll();
+  TEST_ASSERT_EQUAL_INT(0, countData(r.air.sent, 0x04)); // nothing before a power is set
+  r.router.setConfigPower(10);
+  for (int i = 0; i < 5000; i++) { // 5 s at 1 kHz
+    r.router.poll();
+    r.clk.advanceMs(1);
+  }
+  const int n = countData(r.air.sent, 0x04, 2, 3);
+  char msg[40];
+  snprintf(msg, sizeof msg, "LINK_CONFIG in 5 s: %d", n);
+  TEST_MESSAGE(msg);
+  TEST_ASSERT_INT_WITHIN(1, 10, n); // about 2 Hz
+  TEST_ASSERT_EQUAL_INT(0, countData(r.air.sent, 0x04, -1, 0xFF)); // unicast to node 3 only
+  TEST_ASSERT_EQUAL_INT(0, countData(r.usb.sent, 0x04));            // never on USB
+  // last one carries the value; a change goes out at the next poll, not at the next period
+  r.air.sent.clear();
+  r.router.setConfigPower(23);
+  r.router.poll();
+  TEST_ASSERT_EQUAL_INT(1, countData(r.air.sent, 0x04, 2, 3));
+  Packets::LinkConfig lc;
+  for (auto &f : r.air.sent)
+    if (isData(f, 0x04)) TEST_ASSERT_TRUE(lc.decode(f.d + 6, f.len - 6));
+  TEST_ASSERT_EQUAL_INT8(23, lc.tx_power_dbm);
+}
+
+void test_tx_router_drops_link_config_from_usb() {
+  TxRig r;
+  r.router.poll();
+  r.usb.inject(linkConfigFrame(0, 3, 1, 27)); // ground station tries to raise the ship node's power
+  r.usb.inject(linkConfigFrame(0, 0xFF, 2, 27));
+  r.usb.inject(linkConfigFrame(2, 3, 3, 27)); // forged source: still dropped (ingress rule, not source rule)
+  r.router.poll();
+  TEST_ASSERT_EQUAL_INT(0, countData(r.air.sent, 0x04));
+  // other GS traffic still passes to the air (REQUEST), so the rule is specific
+  Packets::Request q;
+  q.req_id = 7;
+  q.action = 11;
+  q.target = 3;
+  uint8_t buf[Packets::Request::kMaxSize];
+  const size_t n = q.encode(buf, sizeof buf);
+  r.usb.inject(makeData(0, 3, Packets::Request::kPort, 4, buf, n, net::wire::Qos::Event, false));
+  r.router.poll();
+  TEST_ASSERT_EQUAL_INT(1, countData(r.air.sent, 0x11, 0, 3));
+  // and the Router's own config frames are still sent
+  r.router.setConfigPower(10);
+  r.router.poll();
+  TEST_ASSERT_EQUAL_INT(1, countData(r.air.sent, 0x04, 2, 3));
+}
+
+void test_ship_accepts_link_config_only_from_router_over_air() {
+  RxRig r;
+  TEST_ASSERT_EQUAL_INT8(10, r.router.desiredPowerDbm());
+  r.uart.inject(linkConfigFrame(2, 3, 1, 12)); // forged by the vehicle side: rejected, whatever the source
+  r.router.poll();
+  TEST_ASSERT_EQUAL_INT8(10, r.router.desiredPowerDbm());
+  TEST_ASSERT_EQUAL_UINT32(1, r.router.linkConfigHandler().rejected);
+  r.fromAir({linkConfigFrame(0, 3, 2, 12)});   // wrong source node (the ground station)
+  TEST_ASSERT_EQUAL_INT8(10, r.router.desiredPowerDbm());
+  r.fromAir({linkConfigFrame(2, 3, 3, 12)});   // the Router over the air
+  TEST_ASSERT_EQUAL_INT8(12, r.router.desiredPowerDbm());
+  TEST_ASSERT_TRUE(r.router.linkConfigFresh());
+  r.fromAir({linkConfigFrame(2, 3, 4, 27)});   // clamped to the default board maximum of the ship node
+  TEST_ASSERT_EQUAL_INT8(12, r.router.desiredPowerDbm());
+  r.clk.t += LinkConfigFollower::kTimeoutNs + 1;
+  TEST_ASSERT_EQUAL_INT8(10, r.router.desiredPowerDbm()); // fail-safe
+  TEST_ASSERT_FALSE(r.router.linkConfigFresh());
+  TEST_ASSERT_EQUAL_INT(0, countData(r.uart.sent, 0x04)); // not forwarded to the vehicle
+}
+
+void test_e2e_link_config_mirrors_power_and_failsafe() {
+  EndToEnd e;
+  e.tx.setConfigPower(10);
+  e.run(1500);
+  TEST_ASSERT_TRUE(e.rx.linkConfigFresh());
+  TEST_ASSERT_EQUAL_INT8(10, e.rx.desiredPowerDbm());
+  e.tx.setConfigPower(12);
+  e.run(120); // one uplink slot (40 ms) plus the air time
+  TEST_ASSERT_EQUAL_INT8(12, e.rx.desiredPowerDbm());
+  TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x04)); // consumed by the ship node, not passed to the vehicle
+  e.tx.setConfigPower(7);                                  // lowering works too
+  e.run(120);
+  TEST_ASSERT_EQUAL_INT8(7, e.rx.desiredPowerDbm());
+  // the Router stops commanding (link lost for 12 s): the ship node falls back to 10 dBm within 10 s
+  e.tx.setConfigPower(12);
+  e.run(120);
+  TEST_ASSERT_EQUAL_INT8(12, e.rx.desiredPowerDbm());
+  e.lossStart = e.clk.nowNs();
+  e.lossEnd = e.lossStart + 12000000000LL;
+  e.run(9000);
+  TEST_ASSERT_EQUAL_INT8(12, e.rx.desiredPowerDbm());
+  e.run(1500);
+  TEST_ASSERT_EQUAL_INT8(10, e.rx.desiredPowerDbm());
+  e.run(4000); // link back: the mirrored value returns
+  TEST_ASSERT_EQUAL_INT8(12, e.rx.desiredPowerDbm());
+}
+
+void test_ship_reboot_requester_retries_until_ack() {
+  { // no ack: 5 tries one second apart, then timed out
+    TxRig r;
+    TEST_ASSERT_TRUE(r.router.requestShipReboot());
+    TEST_ASSERT_FALSE(r.router.requestShipReboot()); // already running
+    for (int i = 0; i < 7000; i++) {
+      r.router.poll();
+      r.clk.advanceMs(1);
+    }
+    TEST_ASSERT_EQUAL_INT(5, countData(r.air.sent, 0x11, 2, 3));
+    TEST_ASSERT_TRUE(r.router.shipReboot().state() == ShipRebootRequester::State::TimedOut);
+    Packets::Request q;
+    for (auto &f : r.air.sent)
+      if (isData(f, 0x11)) {
+        TEST_ASSERT_TRUE(q.decode(f.d + 6, f.len - 6));
+        TEST_ASSERT_EQUAL_UINT8(11, q.action);
+        TEST_ASSERT_EQUAL_UINT8(3, q.target);
+        TEST_ASSERT_TRUE(q.req_id == r.router.shipReboot().reqId() && q.req_id != 0);
+      }
+    TEST_ASSERT_TRUE(r.router.requestShipReboot()); // a new request is possible afterwards
+  }
+  { // ack from the ship node stops it
+    TxRig r;
+    r.router.requestShipReboot();
+    r.router.poll();
+    TEST_ASSERT_EQUAL_INT(1, countData(r.air.sent, 0x11, 2, 3));
+    Packets::RequestAck a;
+    a.req_id = r.router.shipReboot().reqId();
+    a.status = Packets::RequestStatus::kDone;
+    a.detail = 0;
+    uint8_t buf[Packets::RequestAck::kMaxSize];
+    const size_t n = a.encode(buf, sizeof buf);
+    r.air.inject(makeData(3, 2, Packets::RequestAck::kPort, 1, buf, n, net::wire::Qos::Event, false));
+    r.router.poll();
+    TEST_ASSERT_TRUE(r.router.shipReboot().state() == ShipRebootRequester::State::Acked);
+    for (int i = 0; i < 3000; i++) {
+      r.router.poll();
+      r.clk.advanceMs(1);
+    }
+    TEST_ASSERT_EQUAL_INT(1, countData(r.air.sent, 0x11, 2, 3));
+  }
+}
+
+void test_e2e_ship_reboot_request_reaches_ship_node() {
+  EndToEnd e;
+  e.run(1000);
+  TEST_ASSERT_TRUE(e.tx.requestShipReboot());
+  e.run(1500);
+  TEST_ASSERT_TRUE(e.tx.shipReboot().state() == ShipRebootRequester::State::Acked);
+  TEST_ASSERT_TRUE(e.rx.rebootCommandDue());
+  TEST_ASSERT_FALSE(e.rx.uploadCommandDue());
+  TEST_ASSERT_FALSE(e.tx.rebootCommandDue());
+  TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x11));
+}
+
+// ---- Lua menu
+
+/// Parsed 0x2B parameter entry (own decoder: independent of the encoder under test).
+struct Entry {
+  bool ok = false;
+  uint8_t dest, orig, param, chunks, parent, type;
+  char name[40] = "", text[48] = "", unit[8] = "";
+  uint8_t value = 0, min = 0, max = 0, def = 0, status = 0, timeout = 0;
+};
+
+static Entry parseEntry(const CrsfFrame &f) {
+  Entry e;
+  if (f.len < 11 || f.len > 64 || f.bytes[0] != 0xC8 || f.bytes[1] != f.len - 2 || f.bytes[2] != 0x2B) return e;
+  if (crsfCrc8(f.bytes + 2, f.len - 3) != f.bytes[f.len - 1]) return e;
+  e.dest = f.bytes[3];
+  e.orig = f.bytes[4];
+  e.param = f.bytes[5];
+  e.chunks = f.bytes[6];
+  e.parent = f.bytes[7];
+  e.type = f.bytes[8];
+  const uint8_t *p = f.bytes + 9, *end = f.bytes + f.len - 1;
+  auto str = [&](char *dst, size_t cap) {
+    size_t i = 0;
+    while (p < end && *p) {
+      if (i + 1 < cap) dst[i++] = static_cast<char>(*p);
+      p++;
+    }
+    dst[i] = 0;
+    if (p < end) p++;
+  };
+  str(e.name, sizeof e.name);
+  if (e.type == 0x09) {
+    str(e.text, sizeof e.text);
+    if (end - p < 5) return e;
+    e.value = *p++, e.min = *p++, e.max = *p++, e.def = *p++;
+    str(e.unit, sizeof e.unit);
+  } else if (e.type == 0x0C) {
+    str(e.text, sizeof e.text);
+  } else if (e.type == 0x0D) {
+    if (end - p < 2) return e;
+    e.status = *p++;
+    e.timeout = *p++;
+    str(e.text, sizeof e.text);
+  } else {
+    return e;
+  }
+  e.ok = p == end;
+  return e;
+}
+
+struct MenuActions : LuaMenuActions {
+  int power = -100, antenna = -1, rebootRouterCalls = 0, rebootShipCalls = 0, powerCalls = 0;
+  void setTxPower(int8_t dbm) override { power = dbm; powerCalls++; }
+  void setTxAntenna(uint8_t s) override { antenna = s; }
+  void rebootRouter() override { rebootRouterCalls++; }
+  void rebootShipNode() override { rebootShipCalls++; }
+};
+
+void test_lua_power_levels_and_options() {
+  NetLuaMenu m(27);
+  TEST_ASSERT_EQUAL_UINT8(8, m.levelCount());
+  char opts[48];
+  m.buildPowerOptions(opts, sizeof opts);
+  TEST_ASSERT_EQUAL_STRING("0;5;10;13;17;20;23;27", opts);
+  TEST_ASSERT_EQUAL_INT8(0, m.levelAt(0));
+  TEST_ASSERT_EQUAL_INT8(27, m.levelAt(7));
+  TEST_ASSERT_EQUAL_INT8(27, m.levelAt(200)); // out of range index clamps
+  TEST_ASSERT_EQUAL_UINT8(2, m.indexFor(10));
+  TEST_ASSERT_EQUAL_UINT8(2, m.indexFor(11)); // snaps down
+  TEST_ASSERT_EQUAL_UINT8(0, m.indexFor(-4));
+  TEST_ASSERT_EQUAL_UINT8(7, m.indexFor(99));
+  TEST_ASSERT_EQUAL_UINT32(1, NetLuaMenu::milliwatts(0));
+  TEST_ASSERT_EQUAL_UINT32(10, NetLuaMenu::milliwatts(10));
+  TEST_ASSERT_EQUAL_UINT32(100, NetLuaMenu::milliwatts(20));
+  TEST_ASSERT_EQUAL_UINT32(501, NetLuaMenu::milliwatts(27));
+  NetLuaMenu ship(12); // a board maximum of 12 dBm offers 0..10 only
+  TEST_ASSERT_EQUAL_UINT8(3, ship.levelCount());
+  ship.buildPowerOptions(opts, sizeof opts);
+  TEST_ASSERT_EQUAL_STRING("0;5;10", opts);
+}
+
+void test_lua_read_entries() {
+  NetLuaMenu m(27);
+  LuaMenuStatus st;
+  CrsfFrame f;
+  Entry e;
+  const int64_t t = 1000;
+  // power select, addressed to the handset when the ELRS Lua (0xEF) asks
+  TEST_ASSERT_TRUE(m.buildRead(1, 0xEF, st, t, f));
+  e = parseEntry(f);
+  TEST_ASSERT_TRUE(e.ok);
+  TEST_ASSERT_EQUAL_HEX8(0xEA, e.dest);
+  TEST_ASSERT_EQUAL_HEX8(0xEE, e.orig);
+  TEST_ASSERT_EQUAL_UINT8(1, e.param);
+  TEST_ASSERT_EQUAL_UINT8(0, e.chunks);
+  TEST_ASSERT_EQUAL_UINT8(0, e.parent);
+  TEST_ASSERT_EQUAL_HEX8(0x09, e.type);
+  TEST_ASSERT_EQUAL_STRING("Power (10mW legal)", e.name);
+  TEST_ASSERT_EQUAL_STRING("0;5;10;13;17;20;23;27", e.text);
+  TEST_ASSERT_EQUAL_UINT8(2, e.value); // 10 dBm
+  TEST_ASSERT_EQUAL_UINT8(0, e.min);
+  TEST_ASSERT_EQUAL_UINT8(7, e.max);
+  TEST_ASSERT_EQUAL_UINT8(2, e.def);
+  TEST_ASSERT_EQUAL_STRING("dBm", e.unit);
+  TEST_ASSERT_TRUE(f.len <= 64);
+  st.txPowerDbm = 27;
+  TEST_ASSERT_TRUE(m.buildRead(1, 0xEA, st, t, f));
+  e = parseEntry(f);
+  TEST_ASSERT_EQUAL_HEX8(0xEA, e.dest);
+  TEST_ASSERT_EQUAL_UINT8(7, e.value);
+  // mW info
+  TEST_ASSERT_TRUE(m.buildRead(2, 0xEA, st, t, f));
+  e = parseEntry(f);
+  TEST_ASSERT_TRUE(e.ok);
+  TEST_ASSERT_EQUAL_HEX8(0x0C, e.type);
+  TEST_ASSERT_EQUAL_STRING("Power (mW)", e.name);
+  TEST_ASSERT_EQUAL_STRING("501 mW", e.text);
+  // antenna
+  st.txAntennaSel = 2;
+  TEST_ASSERT_TRUE(m.buildRead(3, 0xEA, st, t, f));
+  e = parseEntry(f);
+  TEST_ASSERT_TRUE(e.ok);
+  TEST_ASSERT_EQUAL_STRING("TX antenna", e.name);
+  TEST_ASSERT_EQUAL_STRING("Auto;A;B", e.text);
+  TEST_ASSERT_EQUAL_UINT8(2, e.value);
+  TEST_ASSERT_EQUAL_UINT8(2, e.max);
+  // link
+  st.airState = Packets::AirState::kSynced;
+  st.rxLq = 97;
+  TEST_ASSERT_TRUE(m.buildRead(4, 0xEA, st, t, f));
+  e = parseEntry(f);
+  TEST_ASSERT_TRUE(e.ok);
+  TEST_ASSERT_EQUAL_STRING("Link", e.name);
+  TEST_ASSERT_EQUAL_STRING("Synced LQ 97%", e.text);
+  // ship power: no data, then valid
+  TEST_ASSERT_TRUE(m.buildRead(5, 0xEA, st, t, f));
+  TEST_ASSERT_EQUAL_STRING("no data", parseEntry(f).text);
+  st.shipValid = true;
+  st.shipPowerDbm = 10;
+  TEST_ASSERT_TRUE(m.buildRead(5, 0xEA, st, t, f));
+  e = parseEntry(f);
+  TEST_ASSERT_EQUAL_STRING("Ship power", e.name);
+  TEST_ASSERT_EQUAL_STRING("10 dBm", e.text);
+  // commands, and unknown numbers are not answered
+  TEST_ASSERT_TRUE(m.buildRead(6, 0xEA, st, t, f));
+  e = parseEntry(f);
+  TEST_ASSERT_TRUE(e.ok);
+  TEST_ASSERT_EQUAL_HEX8(0x0D, e.type);
+  TEST_ASSERT_EQUAL_STRING("Reboot router", e.name);
+  TEST_ASSERT_EQUAL_UINT8(0, e.status);
+  TEST_ASSERT_TRUE(m.buildRead(7, 0xEA, st, t, f));
+  TEST_ASSERT_EQUAL_STRING("Reboot ship node", parseEntry(f).name);
+  TEST_ASSERT_FALSE(m.buildRead(0, 0xEA, st, t, f));
+  TEST_ASSERT_FALSE(m.buildRead(8, 0xEA, st, t, f));
+  TEST_ASSERT_FALSE(m.buildRead(255, 0xEA, st, t, f));
+  // every entry fits one frame, with the longest values
+  st.txPowerDbm = 23;
+  for (uint8_t p = 1; p <= NetLuaMenu::kParamCount; p++) {
+    TEST_ASSERT_TRUE(m.buildRead(p, 0xEA, st, t, f));
+    TEST_ASSERT_TRUE(f.len <= 64);
+    TEST_ASSERT_TRUE(parseEntry(f).ok);
+  }
+  TEST_ASSERT_TRUE(NetLuaMenu::pingIsForUs(0x00));
+  TEST_ASSERT_TRUE(NetLuaMenu::pingIsForUs(0xEE));
+  TEST_ASSERT_FALSE(NetLuaMenu::pingIsForUs(0xC8));
+  TEST_ASSERT_EQUAL_HEX8(0xEA, NetLuaMenu::replyDest(0xEF));
+  TEST_ASSERT_EQUAL_HEX8(0xEA, NetLuaMenu::replyDest(0xEA));
+}
+
+void test_lua_power_write_and_antenna_write() {
+  NetLuaMenu m(27);
+  LuaMenuStatus st;
+  MenuActions act;
+  CrsfFrame f;
+  TEST_ASSERT_FALSE(m.handleWrite(1, 7, 0xEF, st, 0, act, f)); // selections reply nothing
+  TEST_ASSERT_EQUAL_INT(27, act.power);
+  m.handleWrite(1, 0, 0xEF, st, 0, act, f);
+  TEST_ASSERT_EQUAL_INT(0, act.power);
+  m.handleWrite(1, 2, 0xEF, st, 0, act, f);
+  TEST_ASSERT_EQUAL_INT(10, act.power);
+  m.handleWrite(1, 99, 0xEF, st, 0, act, f); // out of range index -> highest level, never above the board maximum
+  TEST_ASSERT_EQUAL_INT(27, act.power);
+  NetLuaMenu ship(12);
+  ship.handleWrite(1, 7, 0xEF, st, 0, act, f);
+  TEST_ASSERT_EQUAL_INT(10, act.power);
+  m.handleWrite(3, 1, 0xEF, st, 0, act, f);
+  TEST_ASSERT_EQUAL_INT(1, act.antenna);
+  m.handleWrite(3, 2, 0xEF, st, 0, act, f);
+  TEST_ASSERT_EQUAL_INT(2, act.antenna);
+  m.handleWrite(3, 9, 0xEF, st, 0, act, f);
+  TEST_ASSERT_EQUAL_INT(0, act.antenna);
+  const int calls = act.powerCalls;
+  TEST_ASSERT_FALSE(m.handleWrite(2, 1, 0xEF, st, 0, act, f)); // read-only entries
+  TEST_ASSERT_FALSE(m.handleWrite(4, 1, 0xEF, st, 0, act, f));
+  TEST_ASSERT_FALSE(m.handleWrite(77, 1, 0xEF, st, 0, act, f));
+  TEST_ASSERT_EQUAL_INT(calls, act.powerCalls);
+}
+
+void test_lua_command_confirmation_flow() {
+  NetLuaMenu m(27);
+  LuaMenuStatus st;
+  MenuActions act;
+  CrsfFrame f;
+  Entry e;
+  int64_t t = 1000000000LL;
+  // click: confirmation first, nothing executed
+  TEST_ASSERT_TRUE(m.handleWrite(6, 1, 0xEF, st, t, act, f));
+  e = parseEntry(f);
+  TEST_ASSERT_TRUE(e.ok);
+  TEST_ASSERT_EQUAL_UINT8(3, e.status); // ConfirmationNeeded
+  TEST_ASSERT_EQUAL_STRING("Reboot router?", e.text);
+  TEST_ASSERT_EQUAL_INT(0, act.rebootRouterCalls);
+  // poll while waiting: the handset gets the same state
+  t += 500000000LL;
+  TEST_ASSERT_TRUE(m.handleWrite(6, 6, 0xEF, st, t, act, f));
+  TEST_ASSERT_EQUAL_UINT8(3, parseEntry(f).status);
+  // confirm: executes once
+  TEST_ASSERT_TRUE(m.handleWrite(6, 4, 0xEF, st, t, act, f));
+  TEST_ASSERT_EQUAL_UINT8(2, parseEntry(f).status); // Progress
+  TEST_ASSERT_EQUAL_INT(1, act.rebootRouterCalls);
+  TEST_ASSERT_EQUAL_INT(0, act.rebootShipCalls);
+  // a repeated confirm does not execute again
+  m.handleWrite(6, 4, 0xEF, st, t, act, f);
+  TEST_ASSERT_EQUAL_INT(1, act.rebootRouterCalls);
+  // progress is shown for 2 s, then it is ready again
+  TEST_ASSERT_FALSE(m.handleWrite(6, 6, 0xEF, st, t + 1000000000LL, act, f));
+  TEST_ASSERT_TRUE(m.buildRead(6, 0xEA, st, t + 2500000000LL, f));
+  TEST_ASSERT_EQUAL_UINT8(0, parseEntry(f).status);
+
+  // ship node: click, cancel -> nothing; click, confirm -> one call
+  t += 10000000000LL;
+  TEST_ASSERT_TRUE(m.handleWrite(7, 1, 0xEF, st, t, act, f));
+  TEST_ASSERT_EQUAL_STRING("Reboot ship node?", parseEntry(f).text);
+  TEST_ASSERT_TRUE(m.handleWrite(7, 5, 0xEF, st, t, act, f));
+  TEST_ASSERT_EQUAL_UINT8(0, parseEntry(f).status);
+  TEST_ASSERT_EQUAL_INT(0, act.rebootShipCalls);
+  // a confirm without a click executes nothing
+  TEST_ASSERT_TRUE(m.handleWrite(7, 4, 0xEF, st, t, act, f));
+  TEST_ASSERT_EQUAL_UINT8(0, parseEntry(f).status);
+  TEST_ASSERT_EQUAL_INT(0, act.rebootShipCalls);
+  m.handleWrite(7, 1, 0xEF, st, t, act, f);
+  TEST_ASSERT_TRUE(m.handleWrite(7, 4, 0xEF, st, t, act, f));
+  TEST_ASSERT_EQUAL_INT(1, act.rebootShipCalls);
+  TEST_ASSERT_EQUAL_INT(1, act.rebootRouterCalls);
+  // the confirmation lapses after 10 s: a late confirm does nothing
+  t += 10000000000LL;
+  m.handleWrite(6, 1, 0xEF, st, t, act, f);
+  t += NetLuaMenu::kConfirmTimeoutNs + 1;
+  TEST_ASSERT_TRUE(m.handleWrite(6, 4, 0xEF, st, t, act, f));
+  TEST_ASSERT_EQUAL_UINT8(0, parseEntry(f).status);
+  TEST_ASSERT_EQUAL_INT(1, act.rebootRouterCalls);
+  TEST_ASSERT_EQUAL_UINT8(0, m.commandStep(6));
+  // unknown command status values are ignored
+  TEST_ASSERT_FALSE(m.handleWrite(6, 77, 0xEF, st, t, act, f));
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -864,12 +1396,26 @@ int main(int, char **) {
   RUN_TEST(test_rx_filters_from_air_to_uart);
   RUN_TEST(test_rx_vehicle_request_ack_to_gs_goes_on_air);
   RUN_TEST(test_rx_upload_command_from_uart_and_air);
+  RUN_TEST(test_rx_reboot_command_from_uart_and_air_idempotent);
   RUN_TEST(test_rx_upload_command_idempotent_and_ignored_cases);
   RUN_TEST(test_rx_filters_from_uart_to_air);
   RUN_TEST(test_rx_link_stats_5hz_and_searching);
   RUN_TEST(test_rx_router_no_heap_after_construction);
   RUN_TEST(test_upload_triggers);
   RUN_TEST(test_power_policy);
+  RUN_TEST(test_link_config_packet_bytes);
+  RUN_TEST(test_power_default_and_ceiling_clamp);
+  RUN_TEST(test_link_config_follower_apply_and_failsafe);
+  RUN_TEST(test_tx_router_sends_link_config_continuously);
+  RUN_TEST(test_tx_router_drops_link_config_from_usb);
+  RUN_TEST(test_ship_accepts_link_config_only_from_router_over_air);
+  RUN_TEST(test_e2e_link_config_mirrors_power_and_failsafe);
+  RUN_TEST(test_ship_reboot_requester_retries_until_ack);
+  RUN_TEST(test_e2e_ship_reboot_request_reaches_ship_node);
+  RUN_TEST(test_lua_power_levels_and_options);
+  RUN_TEST(test_lua_read_entries);
+  RUN_TEST(test_lua_power_write_and_antenna_write);
+  RUN_TEST(test_lua_command_confirmation_flow);
   RUN_TEST(test_e2e_rc_state_reaches_uart_at_25hz);
   RUN_TEST(test_e2e_gs_heartbeat_and_rc_never_reach_uart_but_request_does);
   RUN_TEST(test_e2e_request_ack_from_vehicle_reaches_usb);

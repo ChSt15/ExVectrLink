@@ -13,9 +13,36 @@
 
 #include "LinkUploadCommand.hpp"
 #include "NetAirAccess.hpp"
+#include "NetPower.hpp"
 #include "UploadTriggers.hpp"
 
 namespace VCTR::ExVectrLink::netmode {
+
+/// LINK_CONFIG (port 0x04) handler of the ship radio node: accepted only from node 2 and only when it came in over
+/// the air link (never from the UART, whatever source it claims). Copies into the follower, no other work.
+class LinkConfigHandler : public network::PortHandlerI {
+public:
+  LinkConfigHandler(LinkConfigFollower &follower) : follower_(follower) {}
+  void setAirLink(int idx) { airIdx_ = idx; }
+  void onPacket(const network::RxInfo &info, const uint8_t *payload, uint8_t len) override {
+    Packets::LinkConfig lc;
+    if (info.src != 2 || airIdx_ < 0 || info.ingressLink != static_cast<uint8_t>(airIdx_)) {
+      rejected++;
+      return;
+    }
+    if (!lc.decode(payload, len)) {
+      decodeErrors++;
+      return;
+    }
+    follower_.onLinkConfig(lc.tx_power_dbm, info.rxTimeNs);
+    accepted++;
+  }
+  uint32_t accepted = 0, rejected = 0, decodeErrors = 0;
+
+private:
+  LinkConfigFollower &follower_;
+  int airIdx_ = -1;
+};
 
 class RxRouter {
 public:
@@ -24,8 +51,15 @@ public:
   static constexpr uint8_t kVehicle = 1;
   static constexpr int64_t kLinkStatsPeriodNs = 200000000LL; // 5 Hz
 
+  /// `boardMaxDbm`: the board's transmit power maximum, the ceiling of the power LINK_CONFIG can request.
   RxRouter(network::TimeSourceI &time, network::FrameLinkI &uart, network::FrameLinkI &air,
-           AirStatsSourceI &airStats);
+           AirStatsSourceI &airStats, int boardMaxDbm = 12);
+
+  /// Power to apply now (dBm): the Router's LINK_CONFIG value clamped to 0..board maximum, or the 10 dBm default
+  /// while no LINK_CONFIG arrived for 10 s (or never). Level, evaluate every loop pass.
+  int8_t desiredPowerDbm() const { return follower_.power(time_.nowNs()); }
+  bool linkConfigFresh() const { return follower_.fresh(time_.nowNs()); }
+  const LinkConfigHandler &linkConfigHandler() const { return linkConfig_; }
 
   /// Periodic work (heartbeat, own LINK_STATS). Call at least at 10 Hz, together with the links' poll().
   void poll();
@@ -35,8 +69,11 @@ public:
 
   /// True once an accepted link-upload command (REQUEST action 10, target 3) has been pending for its delay (the
   /// ACK has been sent across the air by then): the application then enters upload mode. Level, set by poll().
-  bool uploadCommandDue() const { return uploadDue_; }
-  const LinkUploadCommand &uploadCommand() const { return upload_; }
+  bool uploadCommandDue() const { return upload_.due(LinkCommand::kUploadAction); }
+  /// True once an accepted LINK_REBOOT request (REQUEST action 11, same target and delay) is due: the application
+  /// then restarts the module (ESP.restart()). Level.
+  bool rebootCommandDue() const { return upload_.due(LinkCommand::kRebootAction); }
+  const LinkCommand &uploadCommand() const { return upload_; }
 
   /// LOG_TEXT to the ground station (over the air). Text is truncated to 233 bytes.
   bool log(Packets::Severity severity, const char *text);
@@ -54,9 +91,10 @@ private:
   network::FrameLinkI &uart_;
   AirStatsSourceI &airStats_;
   network::Node node_;
-  network::PortMux<2> mux_;
-  LinkUploadCommand upload_;
-  bool uploadDue_ = false;
+  network::PortMux<2> mux_; // REQUEST, LINK_CONFIG
+  LinkConfigFollower follower_;
+  LinkConfigHandler linkConfig_;
+  LinkCommand upload_; // both link commands (upload mode, reboot)
   int uartIdx_ = -1, airIdx_ = -1;
   int64_t startNs_;
   int64_t nextLinkStatsNs_;

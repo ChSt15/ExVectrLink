@@ -6,7 +6,9 @@
 // this firmware prints nothing (no Core::initialise(), no DebugMonitor). Only the boot ROM prints at power-up
 // (74880 baud garbage on the line; the host resynchronises at the next frame delimiter), and the ArduinoOTA progress
 // callbacks print while in WiFi upload mode, when the link is stopped anyway.
-// Air: the FHSS air link, air profile v1, fixed transmit power (20 dBm clamped to the board maximum), as the FPV RX.
+// Air: the FHSS air link, air profile v1. Transmit power: 10 dBm (10 mW legal limit) at every boot, then the Router's
+// LINK_CONFIG value (clamped to 0..board maximum, RAM only), back to 10 dBm if LINK_CONFIG stops for 10 s
+// (src_network/NetPower.hpp). No dynamic power.
 // WiFi upload (over-the-air firmware update, the receiver cannot be flashed by UART without soldering):
 //   - boot button held at power-up: WiFi only, the link never starts;
 //   - button held 3 s while running: WiFi next to the link (as FPV);
@@ -17,11 +19,11 @@
 
 #include "ExVectrArduinoPlatform.hpp"
 
-#include "ExVectrLink/datalink/DynamicPower.hpp"
 #include "Hardware.hpp"
 #include "WifiUpload.hpp"
 
 #include "NetAirAccess.hpp"
+#include "NetPower.hpp"
 #include "NetRadio.hpp"
 #include "RxRouter.hpp"
 
@@ -36,7 +38,8 @@ using namespace VCTR::ExVectrLink::netmode;
 namespace {
 
 constexpr uint32_t kUartBaud = 460800;
-constexpr int8_t kRxPowerDbm = 20; // as the FPV receiver; the driver clamps it to the board maximum
+// Power at boot: 10 dBm (10 mW legal limit), then the runtime follower of LINK_CONFIG (src_network/NetPower.hpp).
+constexpr int8_t kRxPowerDbm = kNetTxPowerCapDbm;
 
 /// UART0 as a non-blocking byte stream: never writes more than the hardware FIFO / driver buffer accepts.
 class UartStream : public network::ByteStreamI {
@@ -64,9 +67,18 @@ network::StreamFrameLink<1024> uartLink(uartStream, coreTime);
 
 NetAirAccess::Link airLink;
 NetAirAccess airAccess(airLink, coreTime, /*isMaster=*/false, netExpectedRxPerSecond(true));
-RxRouter router(coreTime, uartLink, airLink, airAccess);
+RxRouter router(coreTime, uartLink, airLink, airAccess, HardwareConfig::sx1280AMaxPower);
 
-datalink::DynamicPower power; // fixed power: only used for the board limit
+int8_t currentPower = clampNetPower(kRxPowerDbm, HardwareConfig::sx1280AMaxPower);
+
+/// The power the ship node should use now; applied to the radio on change (a variable write, no radio command, so
+/// it is safe in the main loop and takes effect at the next own TX slot).
+void applyDesiredPower() {
+  const int8_t want = router.desiredPowerDbm();
+  if (want == currentPower) return;
+  currentPower = want;
+  netRadioSetTxPower(currentPower);
+}
 UploadTriggers *triggers = nullptr;
 bool linkStopped = false;
 
@@ -75,6 +87,10 @@ void enterUploadMode(const char *why) {
   linkStopped = true;
   WifiUpload::startWiFiUploadMode(); // removes every scheduler task except WiFi: FHSS stops
 }
+
+/// LINK_REBOOT (REQUEST action 11, target 3): clean software restart. In flight this stops RC for a few seconds
+/// (failsafe); the senders guard it. No log line: it could not leave before the restart.
+void rebootNow() { ESP.restart(); }
 
 } // namespace
 
@@ -96,15 +112,8 @@ void setup() {
 
   WifiUpload::initWifiUpload();
 
-  power.setMaxPower(HardwareConfig::sx1280AMaxPower);
-  power.setMinPower(10);
-  power.setEnableDynamicPower(false);
-  power.setDynMinPower(kRxPowerDbm);
-  power.setDynMaxPower(kRxPowerDbm);
-  power.setPower(kRxPowerDbm);
-
-  netRadioSetup(/*isRxSide=*/true, airAccess, power.getPower());
-  netRadioSetTxPower(power.getPower());
+  netRadioSetup(/*isRxSide=*/true, airAccess, currentPower);
+  netRadioSetTxPower(currentPower);
 
   static UploadTriggers t(coreTime.nowNs(), /*useUartTrigger=*/true);
   triggers = &t;
@@ -120,10 +129,13 @@ void loop() {
   netRadioLoop(); // DIO1 timestamps + scheduler (FHSS slots)
 
   uartLink.poll();
-  airAccess.process(); // received air packet -> frames -> router (-> UART)
-  airAccess.setStatus(netRadioStatus(power.getPower()));
+  airAccess.process(); // received air packet -> frames -> router (-> UART, LINK_CONFIG -> power follower)
+  applyDesiredPower();
+  airAccess.setStatus(netRadioStatus(currentPower)); // LINK_STATS tx_power = what this radio really uses
   router.poll();
   uartLink.poll(); // flush what the router just queued
+
+  if (router.rebootCommandDue() && !linkStopped) rebootNow(); // ACK was sent 400 ms earlier (across the air)
 
   if (triggers) {
     if (router.uploadCommandDue()) triggers->requestCommand(); // ACK was sent 400 ms earlier

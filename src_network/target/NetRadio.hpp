@@ -13,6 +13,7 @@
 #include "ExVectrNetwork/TimeSourceI.hpp"
 
 #include "NetAirAccess.hpp"
+#include "NetPower.hpp"
 
 namespace VCTR::ExVectrLink::netmode {
 
@@ -22,6 +23,10 @@ public:
   int64_t nowNs() override;
 };
 
+/// Power at every boot of a network-mode module (10 mW legal limit, user 2026-11-20). It is the DEFAULT, no longer a
+/// hard cap: the Router's Lua menu may raise the power in RAM up to the board maximum (src_network/NetPower.hpp).
+constexpr int8_t kNetTxPowerCapDbm = kNetTxPowerDefaultDbm;
+
 /// Resets and configures the radios, sets the FHSS role and profile and hooks `access` in. `txPowerDbm` is the
 /// start power (clamped by the board maximum in the driver). Call once from setup().
 void netRadioSetup(bool isRxSide, NetAirAccess &access, int8_t txPowerDbm);
@@ -29,7 +34,7 @@ void netRadioSetup(bool isRxSide, NetAirAccess &access, int8_t txPowerDbm);
 /// Main loop: hands DIO1 timestamps to the drivers and runs the Core scheduler (FHSS, WiFi task).
 void netRadioLoop();
 
-/// Sets the TX power of every radio.
+/// Sets the TX power of every radio, clamped to 0..the board maximum (HardwareConfig::sx1280AMaxPower).
 void netRadioSetTxPower(int8_t dbm);
 
 /// FHSS state, power and antennas for the air access (call every loop).

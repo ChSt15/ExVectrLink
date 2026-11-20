@@ -859,6 +859,80 @@ static void decodeAck(const uint8_t *d, uint8_t len, Packets::RequestAck &out) {
   TEST_ASSERT_TRUE(out.decode(d + 6, len - 6));
 }
 
+// ---- LINK_REBOOT (REQUEST action 11, target 2), TX module: same semantics as action 10 ----
+
+void test_reboot_cmd_acked_then_due_after_delay_upload_not_due() {
+  Rig r;
+  Frame q = uploadRequest(0, 2, 1, 31, 2, 11);
+  r.usb.inject(q.d, q.len);
+  r.router.poll();
+  TEST_ASSERT_EQUAL_INT(1, countUsb(r.usb, 0x12, 0, 2)); // ACK first, to the requester
+  for (auto &i : r.usb.sent)
+    if (isData(i.d, i.len, 0x12)) {
+      Packets::RequestAck a;
+      decodeAck(i.d, i.len, a);
+      TEST_ASSERT_EQUAL_UINT16(31, a.req_id);
+      TEST_ASSERT_TRUE(a.status == Packets::RequestStatus::kDone);
+      TEST_ASSERT_EQUAL_UINT8(0, a.detail);
+    }
+  TEST_ASSERT_FALSE(r.router.rebootCommandDue());
+  r.clk.t += LinkCommand::kDelayNs - 1000000LL;
+  r.router.poll();
+  TEST_ASSERT_FALSE(r.router.rebootCommandDue());
+  r.clk.t += 2000000LL;
+  r.router.poll();
+  TEST_ASSERT_TRUE(r.router.rebootCommandDue());
+  TEST_ASSERT_FALSE(r.router.uploadCommandDue()); // the two actions are independent
+}
+
+void test_reboot_cmd_idempotent_from_first_copy_and_ignored_cases() {
+  {
+    Rig r;
+    Frame q1 = uploadRequest(0, 2, 1, 42, 2, 11);
+    r.usb.inject(q1.d, q1.len);
+    r.router.poll();
+    const int64_t first = r.clk.nowNs();
+    r.clk.t += 100000000LL;
+    Frame q2 = uploadRequest(0, 2, 2, 42, 2, 11);
+    r.usb.inject(q2.d, q2.len);
+    r.router.poll();
+    TEST_ASSERT_EQUAL_INT(2, countUsb(r.usb, 0x12, 0, 2)); // every copy acknowledged
+    r.clk.t = first + LinkCommand::kDelayNs + 1000000LL;
+    r.router.poll();
+    TEST_ASSERT_TRUE(r.router.rebootCommandDue()); // deadline from the FIRST copy
+    TEST_ASSERT_EQUAL_UINT32(2, r.router.uploadCommand().stats.accepted);
+  }
+  {
+    Rig r;
+    Frame wrongTarget = uploadRequest(0, 2, 1, 1, 3, 11);
+    Frame zeroId = uploadRequest(0, 2, 2, 0, 2, 11);
+    Frame wrongAction = uploadRequest(0, 2, 3, 3, 2, 12);
+    r.usb.inject(wrongTarget.d, wrongTarget.len);
+    r.usb.inject(zeroId.d, zeroId.len);
+    r.usb.inject(wrongAction.d, wrongAction.len);
+    r.router.poll();
+    r.clk.t += 2 * LinkCommand::kDelayNs;
+    r.router.poll();
+    TEST_ASSERT_FALSE(r.router.rebootCommandDue());
+    TEST_ASSERT_FALSE(r.router.uploadCommandDue());
+    TEST_ASSERT_FALSE(r.router.uploadCommand().pending());
+    TEST_ASSERT_EQUAL_INT(0, countUsb(r.usb, 0x12));
+    TEST_ASSERT_EQUAL_UINT32(0, r.router.uploadCommand().stats.accepted);
+  }
+}
+
+void test_reboot_cmd_from_air_acked_to_air() {
+  Rig r;
+  Frame q = uploadRequest(1, 2, 1, 5, 2, 11);
+  injectFromAir(r.air, r.clk, q);
+  r.router.poll();
+  AirContents a = drainAir(r.air, r.clk.nowNs());
+  TEST_ASSERT_EQUAL_INT(1, a.count(0x12, 1, 2));
+  r.clk.t += LinkCommand::kDelayNs + 1000000LL;
+  r.router.poll();
+  TEST_ASSERT_TRUE(r.router.rebootCommandDue());
+}
+
 void test_upload_cmd_from_usb_acked_then_due_after_delay() {
   Rig r;
   Frame q = uploadRequest(0, 2, 1, 77);
@@ -1007,6 +1081,9 @@ int main() {
   RUN_TEST(test_no_heap_use_after_construction);
   RUN_TEST(test_filter_only_gs_heartbeat_and_rc_state_dropped_on_air);
   RUN_TEST(test_vehicle_request_ack_reaches_usb);
+  RUN_TEST(test_reboot_cmd_acked_then_due_after_delay_upload_not_due);
+  RUN_TEST(test_reboot_cmd_idempotent_from_first_copy_and_ignored_cases);
+  RUN_TEST(test_reboot_cmd_from_air_acked_to_air);
   RUN_TEST(test_upload_cmd_from_usb_acked_then_due_after_delay);
   RUN_TEST(test_upload_cmd_from_air_acked_to_air);
   RUN_TEST(test_upload_cmd_repeat_is_idempotent_and_each_copy_acked);

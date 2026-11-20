@@ -15,48 +15,10 @@
 #include "LinkUploadCommand.hpp"
 #include "NetAirAccess.hpp"
 #include "NetCrsf.hpp"
+#include "ShipRebootRequester.hpp"
+#include "SourcePort.hpp"
 
 namespace VCTR::ExVectrLink::netmode {
-
-/// Latest value of one subscribed port, accepted from one source node only. Plain port handler: copies the
-/// decoded packet and does no control work (the library's receive-callback rule).
-template <typename T>
-class SourcePort : public network::PortHandlerI {
-public:
-  SourcePort(network::PortRegistryI &mux, uint8_t port, uint8_t acceptedSrc)
-      : src_(acceptedSrc) {
-    subscribed_ = mux.subscribe(port, *this);
-  }
-  bool subscribed() const { return subscribed_; }
-  bool hasValue() const { return has_; }
-  const T &value() const { return value_; }
-  int64_t rxNs() const { return rxNs_; }
-  uint32_t rejectedSource() const { return rejectedSrc_; }
-  uint32_t decodeErrors() const { return decodeErrors_; }
-
-  void onPacket(const network::RxInfo &info, const uint8_t *payload, uint8_t len) override {
-    if (info.src != src_) {
-      rejectedSrc_++;
-      return;
-    }
-    T tmp;
-    if (!tmp.decode(payload, len)) {
-      decodeErrors_++;
-      return;
-    }
-    value_ = tmp;
-    rxNs_ = info.rxTimeNs;
-    has_ = true;
-  }
-
-private:
-  uint8_t src_;
-  bool subscribed_ = false;
-  bool has_ = false;
-  T value_{};
-  int64_t rxNs_ = 0;
-  uint32_t rejectedSrc_ = 0, decodeErrors_ = 0;
-};
 
 class NetworkRouter {
 public:
@@ -67,6 +29,7 @@ public:
   static constexpr uint8_t kRcStatePort = Packets::RcState::kPort;
   static constexpr int64_t kRcSourceTimeoutNs = 100000000LL; // 100 ms
   static constexpr int64_t kLinkStatsPeriodNs = 500000000LL; // 2 Hz (schema air rate)
+  static constexpr int64_t kLinkConfigPeriodNs = 500000000LL; // 2 Hz (schema air rate)
 
   struct RouterStats {
     uint32_t rcFramesOffered = 0; ///< CRSF RC frames turned into RC_STATE
@@ -93,13 +56,31 @@ public:
   /// is to be written as the (single) pending reply.
   bool nextHandsetReply(CrsfFrame &out);
 
+  /// The power the Router is using now (dBm): the single variable it applies to its radios and broadcasts as
+  /// LINK_CONFIG to the ship radio node. Call whenever it changes (and once at start); a change is sent at the
+  /// next poll() instead of waiting for the 2 Hz period.
+  void setConfigPower(int8_t dbm) {
+    if (!haveConfig_ || dbm != configPowerDbm_) nextLinkConfigNs_ = 0;
+    configPowerDbm_ = dbm;
+    haveConfig_ = true;
+  }
+  int8_t configPower() const { return configPowerDbm_; }
+
+  /// Starts a LINK_REBOOT request to the ship radio node (REQUEST action 11, target 3), repeated until acked
+  /// (the Lua "Reboot ship node" command). False if one is already running.
+  bool requestShipReboot() { return shipReboot_.request(time_.nowNs()); }
+  const ShipRebootRequester &shipReboot() const { return shipReboot_; }
+
   /// LOG_TEXT to the ground station (replaces the debug monitor). Text is truncated to 233 bytes.
   bool log(Packets::Severity severity, const char *text);
 
   /// True once an accepted link-upload command (REQUEST action 10, target 2) has been pending for its delay: the
   /// application then enters upload mode (UploadTriggers::requestCommand()). Level, set by poll().
-  bool uploadCommandDue() const { return uploadDue_; }
-  const LinkUploadCommand &uploadCommand() const { return upload_; }
+  bool uploadCommandDue() const { return upload_.due(LinkCommand::kUploadAction); }
+  /// True once an accepted LINK_REBOOT request (REQUEST action 11, same target and delay) is due: the application
+  /// then restarts the module (ESP.restart()). Level.
+  bool rebootCommandDue() const { return upload_.due(LinkCommand::kRebootAction); }
+  const LinkCommand &uploadCommand() const { return upload_; }
 
   network::Node &node() { return node_; }
   const network::Node &node() const { return node_; }
@@ -112,17 +93,21 @@ public:
 private:
   static network::NodeConfig makeConfig();
   void sendOwnLinkStats(int64_t now);
+  void sendLinkConfig(int64_t now);
 
   network::TimeSourceI &time_;
   AirStatsSourceI &airStats_;
   LinkGuard usbGuard_;
   network::Node node_;
-  network::PortMux<8> mux_;
-  LinkUploadCommand upload_;
-  bool uploadDue_ = false;
+  network::PortMux<8> mux_; // LINK_STATS, HANDSET_TELEM, REQUEST, REQUEST_ACK
+  LinkCommand upload_; // both link commands (upload mode, reboot)
   SourcePort<Packets::LinkStats> linkStatsPort_;     // accepted from node 3 only
   SourcePort<Packets::HandsetTelem> handsetTelemPort_; // accepted from node 1 only
+  ShipRebootRequester shipReboot_;
   CrsfTelemetryScheduler scheduler_;
+  int8_t configPowerDbm_ = 10;
+  bool haveConfig_ = false;
+  int64_t nextLinkConfigNs_ = 0;
   int usbIdx_ = -1, airIdx_ = -1;
   int64_t startNs_;
   int64_t nextLinkStatsNs_;
