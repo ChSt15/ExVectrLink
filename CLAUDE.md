@@ -55,3 +55,5 @@ The PlatformIO binary on this machine is `~/.platformio/penv/bin/pio`. Run it fr
 - The `*_ota` envs upload over WiFi to a fixed IP (`upload_port`). Use `--upload-port` to override it.
 - On this machine PlatformIO may stall on network checks (broken IPv6).
 - Range, latency, throughput and sync can only be verified on hardware. Describe the bench test the user should run.
+
+**Pin status (2026-11-21, `feature/setpoint-attitude-pin`):** ExVectrPackets moved to 18b6884 (branch `feature/setpoint-attitude`, schema hash 0xBFF82392; appends `setpoint_q` to MISSION and AIR_MISSION). That commit exists only in the local ExVectrPackets repo and is not pushed: it must be pushed before anyone else can clone this pin. Router (`exvectrlink_tx_module_network`) and ship node (`exvectrlink_rx_network_esp8285_pa`) rebuilt, `pio test -e native` 85/85.
