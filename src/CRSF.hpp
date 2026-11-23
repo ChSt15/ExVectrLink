@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 
+#include "CrsfParser.hpp"
 #include "ExVectrCore/list_buffer.hpp"
 #include "ExVectrCore/time_definitions.hpp"
 #include "ExVectrPackets/Packets.hpp"
@@ -171,6 +172,17 @@ public:
     return true;
   }
 
+  /// Number of CRC-valid received frames waiting in the queue (unlike peekFrameType(), unambiguous for type 0).
+  size_t queuedFrames() const { return rxQueue_.size(); }
+
+  /// Network-mode TX module only: hardened framing (see CrsfParser.hpp). Default off = FPV behaviour unchanged.
+  void setHardenedParser(bool on) { parser_.setHardened(on); }
+  const CrsfParser::Stats &parserStats() const { return parser_.stats(); }
+  void copyRecentBytes(uint8_t out[CrsfParser::kRecentBytes]) const { parser_.copyRecent(out); }
+  /// Half duplex: replies actually sent, and queued replies overwritten by a newer write() before they could go out.
+  uint32_t halfRepliesSent() const { return halfRepliesSent_; }
+  uint32_t halfRepliesReplaced() const { return halfRepliesReplaced_; }
+
   CRSFDuplex getDuplex() const { return duplex_; }
 
 private:
@@ -203,8 +215,11 @@ private:
   void switchToTx();
 
   // ── Frame parsing ──
-  uint8_t rxBuf_[CRSF_MAX_FRAME_LEN];
-  uint8_t rxBufPos_ = 0;
+  static constexpr int64_t kStalePartialNs = 20000000LL; // 20 ms
+  CrsfParser parser_;
+  int64_t lastByteNs_ = 0;
+  uint32_t halfRepliesSent_ = 0;
+  uint32_t halfRepliesReplaced_ = 0;
   void decodeByte(uint8_t b);
   void drainInput();
   Core::ListBuffer<FrameSlot, RX_QUEUE_SIZE> rxQueue_;

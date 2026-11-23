@@ -2,7 +2,7 @@
 
 > Real problems found while reading the code for these docs. None of the entries in the table is fixed yet. Remove an entry when it is fixed, and add new ones as you find them.
 
-Last verified against commit: ce2b498 + feature/network-power-cap (LINK_CONFIG entry; network-mode entries and the FHSS trailer entry; the older entries are as of 4830874)
+Last verified against commit: 0ac4386 + feature/rc-stream-instrumentation (RC stream stall entry); earlier: ce2b498 + feature/network-power-cap (LINK_CONFIG entry; network-mode entries and the FHSS trailer entry; the older entries are as of 4830874)
 
 Severity: **High** = can lose the link or corrupt data in normal use, or blocks the Starship integration. **Medium** = wrong behaviour in some situations or misleading interfaces. **Low** = cosmetic, dead code or hygiene.
 
@@ -31,6 +31,7 @@ Severity: **High** = can lose the link or corrupt data in normal use, or blocks 
 | Low | `src_network/` (RX network firmwares) | The upload command adds a 2-port mux (about 416 bytes RAM on the ESP8285 receiver: 42264 to 42680 of 81920). | The ESP8285 receiver is the tight target; about 39 KB remain. |
 | Low | `lib/ExVectrNetwork` (library update) | After moving the pins to ExVectrNetwork 4090dce, every FPV env uses 128 to 256 bytes more RAM (ESP8285: 35160 to 35288 of 81920). Cause not investigated (the `Sx1280_Direct` driver changed). | Small, but the ESP8285 receiver is the tight target. |
 | Low | `platformio.ini` `[env:native]` | `pio run` without `-e` now also visits the test-only `native` env. | Always pass `-e <env>`. |
+| High | `src/CRSF.cpp`, `src_network/target_tx/network_main.cpp` | Open, cause not yet proven: on a recording the Router stopped producing RC_STATE from the Pocket (handset showed 'connection lost') while the air link kept working. Ranked hypotheses: (1) the handset stopped sending 0x16 frames after the ping/DeviceInfo handshake (in half duplex a new `write()` replaces the pending reply, so telemetry can overwrite DeviceInfo, and a reply only leaves after the next received frame); (2) CRSF parser desync (0x00 accepted as frame start, no resync after a CRC or length failure, break-like 0x00 after `switchToTx`); (3) a CRC-valid type-0 frame latching the `peekFrameType() != 0` loop (transient); (4) UART RX wedge after direction switching. `feature/rc-stream-instrumentation` adds counters (LOG_TEXT `RCDIAG`/`RCFROZEN` lines) and hardens the parser for (2) and (3) in network mode only; (1) and (4) are only observable, not changed. | Pocket RC stream can stall until a channel change. Read the counters on the next bench run (docs/network-mode.md, 'RC stream diagnostics'). |
 | Low | `lib/SBUS` | Pinned to 3dcd5b4 (`v8.1.4-3-g3dcd5b4`), which may only exist in a local fetch. | A fresh clone may fail `git submodule update` for `lib/SBUS`. |
 | Low | `src/main.cpp:529`, `536`, `src/WifiUpload.cpp:138`, `204` | Existing warnings: `++` on `volatile` (deprecated in C++20), signed/unsigned compare. | Noise when checking for new warnings. |
 | Low | `src/CRSFRcInput.cpp:665-682` | The temperature Lua entry has no name set. | The handset shows an empty or default label. |

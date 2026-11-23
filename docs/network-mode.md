@@ -234,6 +234,37 @@ One telemetry frame is queued as the handset reply after each RC frame (`CrsfTel
 
 - Round robin, one frame per handset frame, each kind at most 10 Hz. Sources are fixed: `LINK_STATS` from node 3 only, `HANDSET_TELEM` from node 1 only. Telemetry frames stop when the last `HANDSET_TELEM` is 3 s old.
 
+### RC stream diagnostics and CRSF parser hardening (`feature/rc-stream-instrumentation`)
+
+The shared CRSF framing is `src/CrsfParser.hpp` (pure class, host-tested in `test/test_crsf_parser`). **Legacy mode is the default and is exactly the old `decodeByte()`** (what every FPV firmware runs; a random-stream test compares it with a copy of the original). The network TX module calls `crsf.setHardenedParser(true)`:
+
+- 0x00 is not accepted as a frame start (FPV starts: 0xC8, 0x00, 0xEC, 0xEA, 0xEE; hardened: without 0x00). A 0x00 is what a break or the `switchToTx` constant-low RX routing looks like.
+- After a bad length or CRC failure the bytes behind the first one are rescanned for a real start instead of being discarded (one corrupt byte costs one frame, not the next 2 to 64 bytes).
+- A half-received frame with no new byte for 20 ms is dropped (`staleResets`). This is a poll-to-poll timeout, not the 1 ms inter-byte gap: bytes are read from the UART FIFO in chunks without per-byte timestamps, so a 1 ms gap cannot be told from a loop pause, and the rescan already covers the desync.
+- The main loop uses `crsf.queuedFrames()` instead of `peekFrameType() != 0`, so a CRC-valid type-0 frame at the queue front is dropped (not a loop end), and a failed RC `read()` (frame already removed) no longer causes the next frame to be discarded unseen.
+
+Counters leave as **LOG_TEXT** lines to the ground station at 1 Hz (no ExVectrPackets field has spare room; `LinkStats` has none and the schema is being changed elsewhere). They are dropped while no USB host is attached. Read them in the ground-station log view / recording (severity Info for `RCDIAG`, Warning for `RCFROZEN`):
+
+`RCDIAG b= rc= lua= oth= crc= len= drop= z0= resc= stale= rcAge= anyAge= off= sf= rep=sent/replaced`
+
+| Field | Meaning |
+|---|---|
+| `b` | UART bytes received (cumulative) |
+| `rc` / `lua` / `oth` | CRC-valid frames: RC 0x16 / Lua 0x28, 0x2C, 0x2D / anything else |
+| `crc` / `len` | CRC failures / bad-length resets |
+| `drop` | bytes discarded while hunting for a frame start |
+| `z0` | 0x00 seen as a tentative frame start (always 0 in hardened mode, which no longer accepts it) |
+| `resc` / `stale` | rescans after a failure / stale partial frames dropped |
+| `rcAge` / `anyAge` | ms since the last RC frame / last valid frame of any kind (-1 = none yet; loop granularity) |
+| `off` / `sf` | `rcFramesOffered` / `rcSendFailed` of the router |
+| `rep` | half-duplex replies sent / queued replies overwritten before they could go out (`write()` replacing DeviceInfo with telemetry) |
+
+`RCFROZEN atMs= bytesIn= last16: xx ...` appears every second once RC has been silent for 200 ms and stays until RC returns; the 16 bytes are the last raw UART bytes at that moment (frozen copy).
+
+How to read a stall: `b` still rising and `lua`/`oth` rising but `rc` flat = the handset sends no 0x16 (hypothesis 1; check `rep` replaced > 0 and the frozen bytes for a repeating 0x28 ping pattern). `b` rising, nothing valid, `crc`/`len`/`drop` rising = parser desync or line noise (frozen bytes show what is on the wire). `b` flat = nothing arrives at the UART (handset silent, or RX wedged). `rc` rising but `off` flat is impossible (same call); `off` rising with `sf` rising = the air side refuses RC_STATE, not a CRSF problem.
+
+Cost: FPV TX-module env flash +620 bytes, RAM +80 bytes (counters, 16-byte ring, parser object); behaviour unchanged.
+
 ## WiFi upload and failsafes
 
 Over-the-air (WiFi, ArduinoOTA) upload stays possible on both modules (Revision 1: the receiver cannot be flashed over UART without soldering). Upload mode connects to the WiFi network in `src/WifiCredentials.cpp`, as in FPV (air-protocol.md "WiFi / OTA upload mode").

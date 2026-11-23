@@ -115,66 +115,41 @@ void CRSF::switchToTx() {}
 // standard CRSF frame.
 // ─────────────────────────────────────────────────────────────────────────────
 
-uint8_t CRSF::crc8_d5(const uint8_t *data, size_t length) {
-  uint8_t crc = 0;
-  for (size_t i = 0; i < length; i++) {
-    crc ^= data[i];
-    for (uint8_t b = 0; b < 8; b++) {
-      crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0xD5) : (uint8_t)(crc << 1);
-    }
-  }
-  return crc;
-}
+uint8_t CRSF::crc8_d5(const uint8_t *data, size_t length) { return CrsfParser::crc8(data, length); }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // RX: byte-stream framing + received-frame queue
 // ─────────────────────────────────────────────────────────────────────────────
 
 void CRSF::decodeByte(uint8_t b) {
-  if (rxBufPos_ == 0) {
-    // Accept any plausible CRSF sync/address byte.
-    if (b == 0xC8 || b == 0x00 || b == 0xEC || b == 0xEA || b == 0xEE) {
-      rxBuf_[rxBufPos_++] = b;
+  parser_.feed(b, [this](const uint8_t *bytes, size_t totalLen) {
+    FrameSlot slot;
+    slot.len = static_cast<uint8_t>(totalLen);
+    memcpy(slot.bytes, bytes, totalLen);
+    slot.receiveTime = Core::NowNs();
+    // Prefer freshest data over oldest if the caller isn't draining fast
+    // enough.
+    rxQueue_.placeBack(slot, /*overwrite=*/true);
+    if (duplex_ == CRSFDuplex::Half) {
+      // The bus master (RC) has just finished driving the line and is
+      // now listening for exactly one reply -- if one is queued, this is
+      // the only moment to send it.
+      sendHalfDuplexReply();
     }
-    return;
-  }
-
-  rxBuf_[rxBufPos_++] = b;
-
-  if (rxBufPos_ == 2) {
-    // rxBuf_[1] = frame_size; total frame = frame_size + 2 (sync + len).
-    if (rxBuf_[1] < 2 || rxBuf_[1] > CRSF_MAX_FRAME_LEN - 2) {
-      rxBufPos_ = 0; // invalid length, resync
-    }
-    return;
-  }
-
-  const uint8_t totalLen = rxBuf_[1] + 2;
-  if (rxBufPos_ >= totalLen) {
-    // Verify CRC over [type .. payload], i.e. bytes [2 .. totalLen-2].
-    if (crc8_d5(&rxBuf_[2], rxBuf_[1] - 1) == rxBuf_[totalLen - 1]) {
-      FrameSlot slot;
-      slot.len = totalLen;
-      memcpy(slot.bytes, rxBuf_, totalLen);
-      slot.receiveTime = Core::NowNs();
-      // Prefer freshest data over oldest if the caller isn't draining fast
-      // enough.
-      rxQueue_.placeBack(slot, /*overwrite=*/true);
-      if (duplex_ == CRSFDuplex::Half) {
-        // The bus master (RC) has just finished driving the line and is
-        // now listening for exactly one reply -- if one is queued, this is
-        // the only moment to send it.
-        sendHalfDuplexReply();
-      }
-    }
-    rxBufPos_ = 0;
-  }
+  });
 }
 
 void CRSF::drainInput() {
   uint8_t buf[IO_CHUNK_SIZE];
   size_t avail;
   while ((avail = portReadable()) > 0) {
+    if (parser_.hardened()) {
+      // A half-received frame with no byte behind it for kStalePartialNs cannot complete (a frame takes <1 ms on
+      // the wire): drop it so it cannot swallow the start of the next one. Hardened (network TX) mode only.
+      const int64_t now = Core::NowNs();
+      if (parser_.hasPartial() && now - lastByteNs_ > kStalePartialNs) parser_.resetPartial();
+      lastByteNs_ = now;
+    }
     const size_t chunk = avail < sizeof(buf) ? avail : sizeof(buf);
     const size_t n = portRead(buf, chunk);
     for (size_t i = 0; i < n; i++) {
@@ -204,6 +179,7 @@ bool CRSF::writeFrame(const uint8_t *frame, size_t len) {
     return false;
   }
   if (duplex_ == CRSFDuplex::Half) {
+    if (txBuffer_.size() > 0) halfRepliesReplaced_++;
     // Only one reply is ever in flight -- the bus master expects exactly
     // one frame back, sent the instant its own frame is fully received
     // (see sendHalfDuplexReply()). Replace any stale not-yet-sent frame
@@ -280,6 +256,7 @@ void CRSF::sendHalfDuplexReply() {
   }
   txBuffer_.removeFront(n);
 
+  halfRepliesSent_++;
   switchToTx();
   size_t offset = 0;
   while (offset < n) {

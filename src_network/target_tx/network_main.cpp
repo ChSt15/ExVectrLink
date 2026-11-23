@@ -19,6 +19,7 @@
 #include "ExVectrArduinoPlatform.hpp"
 
 #include "CRSF.hpp"
+#include "CrsfParser.hpp"
 #include "ExVectrPackets/crsf/packets/CRSFPackets.hpp"
 #include "Hardware.hpp"
 #include "Settings.hpp"
@@ -204,6 +205,55 @@ void handleLuaFrame(uint8_t type) {
   }
 }
 
+/// RC-stream diagnostics (docs/network-mode.md "RC stream diagnostics"). No schema field has room for these, so
+/// they leave as LOG_TEXT lines at 1 Hz (dropped silently while no host is attached). Instrumentation only.
+class RcDiag {
+public:
+  void update(int64_t now) {
+    const CrsfParser::Stats &st = crsf.parserStats();
+    if (st.framesRc != lastRc_) { lastRc_ = st.framesRc; lastRcNs_ = now; frozen_ = false; }
+    const uint32_t anyNow = st.framesRc + st.framesLua + st.framesOther;
+    if (anyNow != lastAny_) { lastAny_ = anyNow; lastAnyNs_ = now; }
+    // RC silent for 200 ms: freeze the last raw bytes once per silence (kept until RC returns).
+    if (!frozen_ && lastRcNs_ != 0 && now - lastRcNs_ >= 200000000LL) {
+      crsf.copyRecentBytes(frozenBytes_);
+      frozenAtMs_ = static_cast<uint32_t>(now / 1000000LL);
+      frozenBytesAtSilence_ = st.bytesIn;
+      frozen_ = true;
+    }
+    if (now < nextLogNs_) return;
+    nextLogNs_ = now + 1000000000LL;
+    char line[200];
+    const long rcAge = lastRcNs_ ? static_cast<long>((now - lastRcNs_) / 1000000LL) : -1;
+    const long anyAge = lastAnyNs_ ? static_cast<long>((now - lastAnyNs_) / 1000000LL) : -1;
+    snprintf(line, sizeof line,
+             "RCDIAG b=%lu rc=%lu lua=%lu oth=%lu crc=%lu len=%lu drop=%lu z0=%lu resc=%lu stale=%lu "
+             "rcAge=%ld anyAge=%ld off=%lu sf=%lu rep=%lu/%lu",
+             (unsigned long)st.bytesIn, (unsigned long)st.framesRc, (unsigned long)st.framesLua,
+             (unsigned long)st.framesOther, (unsigned long)st.crcFail, (unsigned long)st.badLen,
+             (unsigned long)st.droppedHunting, (unsigned long)st.zeroStarts, (unsigned long)st.rescans,
+             (unsigned long)st.staleResets, rcAge, anyAge, (unsigned long)router.stats.rcFramesOffered,
+             (unsigned long)router.stats.rcSendFailed, (unsigned long)crsf.halfRepliesSent(),
+             (unsigned long)crsf.halfRepliesReplaced());
+    router.log(Packets::Severity::kInfo, line);
+    if (frozen_) {
+      int n = snprintf(line, sizeof line, "RCFROZEN atMs=%lu bytesIn=%lu last16:", (unsigned long)frozenAtMs_,
+                       (unsigned long)frozenBytesAtSilence_);
+      for (uint8_t i = 0; i < CrsfParser::kRecentBytes && n > 0 && n < (int)sizeof line - 4; i++)
+        n += snprintf(line + n, sizeof line - n, " %02X", frozenBytes_[i]);
+      router.log(Packets::Severity::kWarning, line);
+    }
+  }
+
+private:
+  uint32_t lastRc_ = 0, lastAny_ = 0;
+  int64_t lastRcNs_ = 0, lastAnyNs_ = 0, nextLogNs_ = 0;
+  bool frozen_ = false;
+  uint8_t frozenBytes_[CrsfParser::kRecentBytes] = {0};
+  uint32_t frozenAtMs_ = 0, frozenBytesAtSilence_ = 0;
+};
+RcDiag rcDiag;
+
 void enterUploadMode(const char *why) {
   router.log(Packets::Severity::kWarning, why);
   usbLink.poll();
@@ -239,6 +289,7 @@ void setup() {
   // Single shared half-duplex pin: attach as UART RX only, CRSF reroutes it to TX for each reply.
   linkSerialPort.begin(kCrsfBaud, SERIAL_8N1, HardwareConfig::serialRx, -1, false);
   crsf.beginHalfDuplex();
+  crsf.setHardenedParser(true); // network mode only: no 0x00 start byte, rescan after a CRC/length failure
 
   WifiUpload::initWifiUpload();
   applyStoredRfSettings();
@@ -266,8 +317,11 @@ void loop() {
   hostWasConnected = host;
 
   crsf.available();
+  rcDiag.update(coreTime.nowNs());
   bool paramHandled = false;
-  while (crsf.peekFrameType() != 0) {
+  // queuedFrames(), not peekFrameType() != 0: a CRC-valid type-0 frame at the front must be dropped below, not end
+  // (or latch) this loop.
+  while (crsf.queuedFrames() > 0) {
     if (crsf.peekFrameType() ==
         static_cast<uint8_t>(VCTR::packets::crsf::CRSFFrameType::RcChannelsPacked)) {
       CRSF::ReceivedPacket<VCTR::packets::crsf::CRSFPacket_RcChannelsPacked> rx;
@@ -278,6 +332,7 @@ void loop() {
         if (router.nextHandsetReply(reply)) crsf.write(RawCrsfFrame(reply));
         continue;
       }
+      continue; // read() took the frame out of the queue even though it did not decode
     }
     const uint8_t t = crsf.peekFrameType();
     if (t == static_cast<uint8_t>(VCTR::packets::crsf::CRSFFrameType::ParameterPing) ||
