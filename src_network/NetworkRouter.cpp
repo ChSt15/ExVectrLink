@@ -24,26 +24,32 @@ NetworkRouter::NetworkRouter(network::TimeSourceI &time, network::FrameLinkI &us
       handsetTelemPort_(mux_, Packets::HandsetTelem::kPort, kVehicle), shipReboot_(node_, mux_), startNs_(time.nowNs()), nextLinkStatsNs_(startNs_) {
   node_.setDataSink(mux_);
 
-  // Where frames must not go (design 3.3.3, the Revision 1 heartbeat rule, docs/network-mode.md "Filters"):
+  // Where frames must not go (design 3.3.3, docs/network-mode.md "Filters", docs/gs-control-design.md section 7):
   //  - USB: everything may go to the ground station, except the copies addressed to the vehicle (Node::send floods
-  //    a unicast frame to every link while it has no route).
-  //  - Air: only the ground station's HEARTBEAT is dropped (user decision 2026-11-19); its REQUESTs and every other
-  //    frame pass. Also dropped: anything addressed to the ground station (it is on USB), no USB-only ports
-  //    (>= 0x80), and no RC_STATE that came in over USB whatever its source (the Pocket is the only RC source on the
-  //    radio path).
+  //    a unicast frame to every link while it has no route), and CMD_STATE (the ground station never needs it back).
+  //  - Air: the ground station's HEARTBEAT is dropped; its REQUESTs and every other frame pass. Also dropped:
+  //    anything addressed to the ground station (it is on USB), no USB-only ports (>= 0x80), and RC_STATE (0x10)
+  //    from every ingress: the handset's RC_STATE goes to the ground station over USB only and never on the radio.
+  //    CMD_STATE (0x13) is the only control traffic that crosses: it passes only when it came in over USB with
+  //    source 0 (a drop for sources 1, 2, 3 on any ingress; the only other ingresses, the air link and this node
+  //    itself, are never sources of CMD_STATE). Uplink only: the USB link drops it on egress.
   EgressFilter usbFilter;
   usbFilter.addDstDrop(kVehicle);
+  usbFilter.addRule(network::kAnyLink, kCmdStatePort);
   usbIdx_ = node_.addLink(usbGuard_, usbFilter);
 
   EgressFilter airFilter;
   airFilter.portLimit = 0x80;
   airFilter.addDstDrop(kGroundStation);
+  airFilter.addRule(network::kAnyLink, kRcStatePort);
   if (usbIdx_ >= 0) {
-    airFilter.addRule(static_cast<uint8_t>(usbIdx_), kRcStatePort);
     // LINK_CONFIG only travels Router -> air: the ground station can never inject it (it raises the ship node's
     // transmit power; docs/known-issues.md).
     airFilter.addRule(static_cast<uint8_t>(usbIdx_), Packets::LinkConfig::kPort);
   }
+  airFilter.addSrcPortDrop(kVehicle, kCmdStatePort);
+  airFilter.addSrcPortDrop(kNodeId, kCmdStatePort);
+  airFilter.addSrcPortDrop(kRxModule, kCmdStatePort);
   airFilter.addHeartbeatDrop(kGroundStation);
   airIdx_ = node_.addLink(air, airFilter);
 
@@ -101,8 +107,8 @@ void NetworkRouter::onCrsfRcFrame(const uint16_t *channels) {
   haveRc_ = true;
   if (n == 0) return;
   stats.rcFramesOffered++;
-  // Control QoS, latest-wins: a newer state replaces the queued one on the air side.
-  if (!node_.send(kVehicle, kRcStatePort, buf, n, Qos::Control, true)) stats.rcSendFailed++;
+  // Handset channels go to the ground station over USB only (GS-control design: the vehicle no longer takes the
+  // handset over the air, the ground station sends CMD_STATE instead).
   if (!node_.send(kGroundStation, kRcStatePort, buf, n, Qos::Control, true)) stats.rcSendFailed++;
 }
 

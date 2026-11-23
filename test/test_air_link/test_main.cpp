@@ -135,6 +135,13 @@ static Frame rcStateFrame(uint8_t src, uint8_t dst, uint8_t seq) {
   return makeData(src, dst, Packets::RcState::kPort, seq, buf, n, net::wire::Qos::Control, true);
 }
 
+/// CMD_STATE (port 0x13, 14 B). The routers never parse it; the payload carries `tag` in byte 0 to tell frames apart.
+static Frame cmdStateFrame(uint8_t src, uint8_t dst, uint8_t seq, uint8_t tag = 0) {
+  uint8_t pl[Packets::CmdState::kMaxSize] = {};
+  pl[0] = tag;
+  return makeData(src, dst, Packets::CmdState::kPort, seq, pl, sizeof pl, net::wire::Qos::Control, true);
+}
+
 static bool isData(const Frame &f, uint8_t port) { return f.len >= 6 && (f.d[0] & 0x30) == 0 && f.d[4] == port; }
 static bool isHb(const Frame &f) { return f.len >= 4 && ((f.d[0] >> 4) & 3) == 1; }
 static int countData(const std::vector<Frame> &v, uint8_t port, int src = -1, int dst = -1) {
@@ -446,15 +453,41 @@ void test_rx_filters_from_air_to_uart() {
              rcStateFrame(0, 1, 1),                                 // ground station RC_STATE: dropped
              makeData(0, 1, 0x11, 1, pl, 12, net::wire::Qos::Event, false), // ground station REQUEST: passes
              makeData(0, 1, 0x20, 2, pl, 12),                       // other ground station data: passes
-             rcStateFrame(2, 1, 1),                                 // the Pocket's RC_STATE via the TX module
+             rcStateFrame(2, 1, 1),                                 // RC_STATE from any source: dropped (GS-control)
+             cmdStateFrame(0, 1, 1),                                // CMD_STATE from node 0: passes
+             cmdStateFrame(1, 1, 2),                                // CMD_STATE from node 1, 2, 3: dropped
+             cmdStateFrame(2, 1, 3),
+             cmdStateFrame(3, 1, 4),
              makeHeartbeat(2, 2)});                                 // TX module heartbeat
   TEST_ASSERT_EQUAL_INT(0, countHb(r.uart.sent, 0));
   TEST_ASSERT_EQUAL_INT(0, countData(r.uart.sent, 0x10, 0));
   TEST_ASSERT_EQUAL_INT(1, countData(r.uart.sent, 0x11, 0, 1));
   TEST_ASSERT_EQUAL_INT(1, countData(r.uart.sent, 0x20, 0, 1));
-  TEST_ASSERT_EQUAL_INT(1, countData(r.uart.sent, 0x10, 2, 1));
+  TEST_ASSERT_EQUAL_INT(0, countData(r.uart.sent, 0x10)); // no RC_STATE on the vehicle UART, whatever its source
+  TEST_ASSERT_EQUAL_INT(1, countData(r.uart.sent, 0x13));
+  TEST_ASSERT_EQUAL_INT(1, countData(r.uart.sent, 0x13, 0, 1)); // src 0 preserved
   TEST_ASSERT_EQUAL_INT(1, countHb(r.uart.sent, 2));
   TEST_ASSERT_TRUE(r.router.node().stats.egressFiltered >= 2);
+}
+
+void test_rx_cmd_state_from_vehicle_side_not_on_air_and_downlink_unaffected() {
+  RxRig r;
+  // CMD_STATE arriving from the vehicle UART, any source (including a forged node 0): never on the air.
+  r.uart.inject(cmdStateFrame(0, 1, 1));
+  r.uart.inject(cmdStateFrame(1, 0, 2));
+  r.uart.inject(cmdStateFrame(1, 2, 3));
+  r.uart.inject(cmdStateFrame(1, 0xFF, 4));
+  r.router.poll();
+  TEST_ASSERT_EQUAL_INT(0, countData(r.toAir(), 0x13));
+  // Downlink is unaffected: vehicle telemetry (port 0x20) and an ACK still go on the air.
+  const uint8_t pl[12] = {0};
+  r.uart.inject(makeData(1, 0, 0x20, 1, pl, 12));
+  r.uart.inject(makeData(1, 0, 0x12, 1, pl, 4, net::wire::Qos::Event, false));
+  r.router.poll();
+  auto air = r.toAir();
+  TEST_ASSERT_EQUAL_INT(1, countData(air, 0x20, 1, 0));
+  TEST_ASSERT_EQUAL_INT(1, countData(air, 0x12, 1, 0));
+  TEST_ASSERT_EQUAL_INT(0, countData(air, 0x13));
 }
 
 void test_rx_vehicle_request_ack_to_gs_goes_on_air() {
@@ -726,8 +759,10 @@ struct EndToEnd {
   RxRouter rx{clk, uart, rxLink, rxAcc};
   int64_t lossStart = 0, lossEnd = 0;
   uint32_t slot = 0;
-  bool pocketOn = true;
-  uint32_t rcOnUart = 0;
+  bool pocketOn = true; ///< the handset: RC_STATE to the GS on USB only
+  bool gsOn = true;     ///< the ground station: CMD_STATE over USB at 25 Hz
+  uint32_t rcOnUart = 0;  ///< CMD_STATE frames seen on the vehicle UART
+  uint32_t pocketRcOnUart = 0; ///< RC_STATE (0x10) frames seen on the vehicle UART: must stay 0
   int64_t lastRcOnUartNs = 0;
 
   EndToEnd() {
@@ -742,6 +777,7 @@ struct EndToEnd {
       for (int i = 0; i < 16; i++) ch[i] = 992;
       tx.onCrsfRcFrame(ch);
     }
+    if (gsOn && (clk.t / 1000000LL) % 40 == 7) usb.inject(cmdStateFrame(0, 1, (uint8_t)(clk.t / 40000000LL)));
     if ((clk.t / 1000000LL) % 20 == 0) {
       const bool masterSlot = (slot++ % 2) == 1;
       NetAirAccess &from = masterSlot ? txAcc : rxAcc;
@@ -767,26 +803,33 @@ struct EndToEnd {
       const size_t n0 = uart.sent.size();
       step1ms();
       for (size_t k = n0; k < uart.sent.size(); k++)
-        if (isData(uart.sent[k], 0x10)) {
+      {
+        if (isData(uart.sent[k], 0x13)) {
           rcOnUart++;
           lastRcOnUartNs = clk.nowNs();
         }
+        if (isData(uart.sent[k], 0x10)) pocketRcOnUart++;
+      }
     }
   }
 };
 
-void test_e2e_rc_state_reaches_uart_at_25hz() {
+void test_e2e_cmd_state_reaches_uart_at_25hz_and_pocket_rc_never() {
   EndToEnd e;
   e.run(1000);
   const uint32_t rc0 = e.rcOnUart;
   e.run(2000);
   const uint32_t rc = e.rcOnUart - rc0;
   char msg[60];
-  snprintf(msg, sizeof msg, "RC_STATE on the RX UART in 2 s: %u", (unsigned)rc);
+  snprintf(msg, sizeof msg, "CMD_STATE on the RX UART in 2 s: %u", (unsigned)rc);
   TEST_MESSAGE(msg);
   TEST_ASSERT_UINT32_WITHIN(1, 50, rc); // 25 Hz: one per uplink slot
-  TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x10, -1, 0));     // never the ground-station copy
-  TEST_ASSERT_TRUE(countData(e.uart.sent, 0x10, 2, 1) > 0);
+  TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x13, -1, 2)); // only the GS's frames
+  TEST_ASSERT_TRUE(countData(e.uart.sent, 0x13, 0, 1) > 0);       // src 0 preserved
+  // The Pocket is on at 250 Hz: its RC_STATE goes to the GS on USB, never on the air or the UART.
+  TEST_ASSERT_EQUAL_UINT32(0, e.pocketRcOnUart);
+  TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x10));
+  TEST_ASSERT_TRUE(countData(e.usb.sent, 0x10, 2, 0) > 100);
   // LINK_STATS of node 3 reaches the TX module (and the ground station on USB)
   TEST_ASSERT_TRUE(e.tx.linkStatsPort().hasValue());
   TEST_ASSERT_TRUE(countData(e.usb.sent, 0x01, 3) > 0);
@@ -796,19 +839,31 @@ void test_e2e_rc_state_reaches_uart_at_25hz() {
 
 void test_e2e_gs_heartbeat_and_rc_never_reach_uart_but_request_does() {
   EndToEnd e;
+  e.gsOn = false;
   const uint8_t pl[12] = {0};
   for (int i = 0; i < 100; i++) {
     e.usb.inject(makeHeartbeat(0, 0));                 // ground-station heartbeat
-    e.usb.inject(rcStateFrame(0, 1, (uint8_t)i));      // virtual radio RC_STATE
+    e.usb.inject(rcStateFrame(0, 1, (uint8_t)i));      // old virtual radio RC_STATE
     e.usb.inject(rcStateFrame(1, 1, (uint8_t)i));      // RC_STATE injected over USB with a forged source
     e.usb.inject(makeData(0, 1, 0x11, (uint8_t)i, pl, 12, net::wire::Qos::Event, false)); // REQUEST
     e.run(20);
   }
   TEST_ASSERT_EQUAL_INT(0, countHb(e.uart.sent, 0));
-  TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x10, 0));
-  TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x10, 1));
+  TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x10));
   TEST_ASSERT_TRUE(countData(e.uart.sent, 0x11, 0, 1) > 0); // ground-station REQUESTs reach the vehicle UART
-  TEST_ASSERT_TRUE(countData(e.uart.sent, 0x10, 2) > 0);    // the Pocket's state still flows
+}
+
+void test_e2e_cmd_state_spoof_sources_never_reach_uart() {
+  EndToEnd e;
+  e.gsOn = false;
+  for (int i = 0; i < 100; i++) {
+    e.usb.inject(cmdStateFrame(1, 1, (uint8_t)i)); // forged vehicle source over USB
+    e.usb.inject(cmdStateFrame(2, 1, (uint8_t)i)); // forged TX module source
+    e.usb.inject(cmdStateFrame(3, 1, (uint8_t)i)); // forged RX module source
+    e.run(20);
+  }
+  TEST_ASSERT_EQUAL_INT(0, countData(e.uart.sent, 0x13));
+  TEST_ASSERT_EQUAL_INT(0, countData(e.usb.sent, 0x13)); // and never echoed back on USB
 }
 
 void test_e2e_request_ack_from_vehicle_reaches_usb() {
@@ -869,17 +924,17 @@ void test_e2e_upload_command_to_tx_acked_on_usb() {
   TEST_ASSERT_FALSE(e.rx.uploadCommandDue());
 }
 
-void test_e2e_pocket_off_silence_and_no_late_release() {
+void test_e2e_gs_off_silence_and_no_late_release() {
   EndToEnd e;
   e.run(1000);
-  e.pocketOn = false;
+  e.gsOn = false;
   const int64_t off = e.clk.nowNs();
   e.run(1000);
-  // The last RC_STATE on the UART was originated before the Pocket stopped; it arrives at most one uplink slot plus
+  // The last CMD_STATE on the UART was originated before the GS stopped; it arrives at most one uplink slot plus
   // the expiry limit later.
   TEST_ASSERT_TRUE(e.lastRcOnUartNs - off <= 100000000LL + 40000000LL);
-  // RF block of 5 s with the Pocket on: nothing old is released afterwards.
-  e.pocketOn = true;
+  // RF block of 5 s with the GS on: nothing old is released afterwards.
+  e.gsOn = true;
   e.run(500);
   e.lossStart = e.clk.t;
   e.lossEnd = e.clk.t + 5000000000LL;
@@ -1416,11 +1471,13 @@ int main(int, char **) {
   RUN_TEST(test_lua_read_entries);
   RUN_TEST(test_lua_power_write_and_antenna_write);
   RUN_TEST(test_lua_command_confirmation_flow);
-  RUN_TEST(test_e2e_rc_state_reaches_uart_at_25hz);
+  RUN_TEST(test_e2e_cmd_state_reaches_uart_at_25hz_and_pocket_rc_never);
+  RUN_TEST(test_e2e_cmd_state_spoof_sources_never_reach_uart);
+  RUN_TEST(test_rx_cmd_state_from_vehicle_side_not_on_air_and_downlink_unaffected);
   RUN_TEST(test_e2e_gs_heartbeat_and_rc_never_reach_uart_but_request_does);
   RUN_TEST(test_e2e_request_ack_from_vehicle_reaches_usb);
   RUN_TEST(test_e2e_upload_command_to_rx_over_air_ack_before_entry);
   RUN_TEST(test_e2e_upload_command_to_tx_acked_on_usb);
-  RUN_TEST(test_e2e_pocket_off_silence_and_no_late_release);
+  RUN_TEST(test_e2e_gs_off_silence_and_no_late_release);
   return UNITY_END();
 }

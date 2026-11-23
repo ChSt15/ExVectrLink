@@ -27,6 +27,7 @@ These docs are versioned with the code. **Keep them current:** a change isn't fi
 - `feature/remove-serial` deleted code from `src/main.cpp`, `src/DatalinkCommandManager.cpp` and `src/WifiUpload.cpp`. Where those docs cite line numbers in those files, the numbers were not all re-checked and may be off. Their `Last verified` commit is deliberately left at the pre-removal commit.
 - **Network-mode names:** Router = TX module = node 2 = the Radiomaster Pocket module; ship radio node (ship node) = RX module = node 3 (glossary in [network-mode.md](network-mode.md)). User-facing text says Router / ship node; code identifiers and env names keep TX module / RX module.
 - `feature/network-power-cap` added to `src_network/` the Router Lua menu (`NetLuaMenu.hpp`), the one manual power setting (`NetPower.hpp`), `LINK_CONFIG` (ExVectrPackets `feature/link-config`) and `ShipRebootRequester.hpp`; dynamic power is off in network mode. Nothing in `src/` changed.
+- `feature/cmd-uplink` changed `src_network/` (Router and ship node filters: CMD_STATE 0x13 node 0 -> vehicle only, RC_STATE off the air), the network-mode tests, and the ExVectrPackets pin (49d89c6). Nothing in `src/` changed.
 - "TX side" means the handset end (`IS_TX_SIDE`). "RX side" means the vehicle end. "Uplink" is TX → RX, "downlink" is RX → TX.
 
 Last verified against commit: ce2b498 + `feature/gs-requests-and-upload` (submodules: ExVectrNetwork de708ca, ExVectrPackets 4ca8fb1 local). Docs that this branch did not touch keep their own, older commit.

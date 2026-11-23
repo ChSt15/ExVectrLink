@@ -2,7 +2,7 @@
 
 > Separately compiled firmwares that run the ExVectrNetwork stack instead of the FPV link: the **TX module** (Radiomaster Pocket, diversity board) as node 2 and the **vehicle receiver** as node 3. Both are routers. They talk over the existing FHSS with a network-mode air profile and carry ExVectrNetwork frames end to end: USB (ground station) ↔ TX module ↔ air ↔ RX module ↔ UART (vehicle). The FPV firmwares are unchanged.
 
-Last verified against commit: ce2b498 + `feature/gs-requests-and-upload` (submodules: ExVectrLink `feature/gs-requests-and-upload`, ExVectrNetwork `feature/gs-requests-and-upload` de708ca, ExVectrPackets 7b7285d (Development, pushed), schema hash 0x65E4E6E3 (link nodes only forward the hash via `Packets::kSchemaHash`, no constant in this repo); src_network changes of `feature/network-power-cap`: Router Lua menu, one manual power setting, LINK_CONFIG)
+Last verified against commit: ce2b498 + `feature/gs-requests-and-upload` (submodules: ExVectrLink `feature/gs-requests-and-upload`, ExVectrNetwork `feature/gs-requests-and-upload` de708ca, ExVectrPackets 49d89c6 (Development, pushed), schema hash 0xF1941A87 (link nodes only forward the hash via `Packets::kSchemaHash`, no constant in this repo); `feature/cmd-uplink` (CMD_STATE uplink, RC_STATE off the air); src_network changes of `feature/network-power-cap`: Router Lua menu, one manual power setting, LINK_CONFIG)
 
 Spec: workspace `docs/network-design.md`. The **Revision 1 box** at its top supersedes the text below it: FHSS (not a new TDMA) carries the air link, air profile v1, fixed full-length packets, 1:1 slot ratio, compile-time separation on the ESP8285, over-the-air upload and the 60 s sync failsafe kept. Also sections 3.2 (datalinks), 3.3 (network, filters), 3.3.5 (timeouts), 4 (wire format), 5.3. Stack docs: `lib/ExVectrNetwork/docs/` (`node.md`, `wire.md`, `aggregator.md`, `sx1280-frame-length.md`). Packets: `lib/ExVectrPackets/docs/`.
 
@@ -178,18 +178,23 @@ The Router implements the EdgeTX/ELRS Lua parameter server (`src_network/NetLuaM
 
 ### Egress filters (ExVectrNetwork `EgressFilter`)
 
-User decision 2026-11-19: **only the ground station's HEARTBEAT is dropped over radio** (and its RC_STATE). Every other ground-station frame passes, in particular `REQUEST` (calibration commands, link upload) towards the vehicle and the link modules, and `REQUEST_ACK` back.
+User decision 2026-11-19: **only the ground station's HEARTBEAT is dropped over radio.** Every other ground-station frame passes, in particular `REQUEST` (calibration commands, link upload) towards the vehicle and the link modules, and `REQUEST_ACK` back.
 
 | Router | Link | Rule | Why |
 |---|---|---|---|
 | TX (2) | air | `addHeartbeatDrop(0)` | the ground station's heartbeat never goes on the air (the vehicle must not see the ground station as a peer; it is also not a failure condition) |
-| TX (2) | air | `addRule(usb, 0x10)` | RC_STATE that arrived over USB never goes to air, whatever source it claims. The Pocket (originated locally, ingress `kIngressLocal`) is the only RC source on the radio path. |
-| TX (2) | air | `addDstDrop(0)` | Nothing addressed to the ground station belongs on the air (it is on USB). `Node::send` floods a unicast frame while it has no route: the dst-0 copy of the Pocket's RC_STATE would otherwise go on the air whenever no ground station is attached. |
+| TX (2) | air | `addRule(any, 0x10)` | **RC_STATE (port 0x10) never goes on the air**, from any ingress (GS-control cutover, `feature/cmd-uplink`). The Pocket's RC_STATE is sent to the ground station on USB only. |
+| TX (2) | air | `addSrcPortDrop(1 / 2 / 3, 0x13)` | **CMD_STATE (port 0x13) crosses to the air only from node 0** (its only possible ingress is USB: the air link never egresses to itself and node 2 originates none). A forged source 1, 2 or 3 on USB is dropped (src 2 is this node: dropped as self-echo at ingress). Latest-wins in the aggregator (CONTROL class, key src/dst/port, 100 ms expiry), uplink only. |
+| TX (2) | air | `addRule(usb, 0x04)` | `LINK_CONFIG` that arrived over USB never goes to air (see below). |
+| TX (2) | air | `addDstDrop(0)` | Nothing addressed to the ground station belongs on the air (it is on USB). `Node::send` floods a unicast frame while it has no route. |
 | TX (2) | air | `portLimit 0x80` | USB-only debug ports |
-| TX (2) | USB | `addDstDrop(1)` | the dst-1 copy of the Pocket's RC_STATE stays off USB (the ground station gets its own dst-0 copy) |
+| TX (2) | USB | `addDstDrop(1)` | frames addressed to the vehicle stay off USB (`Node::send` floods a unicast frame while it has no route) |
+| TX (2) | USB | `addRule(any, 0x13)` | CMD_STATE is never sent back to the ground station (uplink only; also covers a CMD_STATE from the air side) |
 | TX (2) | USB | `LinkGuard` gate | refuse while no host is attached or more than 256 bytes wait in the TX ring; nothing is held back |
 | RX (3) | UART | `addHeartbeatDrop(0)` | no ground-station heartbeat reaches the vehicle |
-| RX (3) | UART | `addSrcPortDrop(0, 0x10)` | **no RC_STATE from node 0 ever reaches the vehicle** (second layer behind the TX module). RC_STATE from node 2 (the Pocket) passes. Other node 0 frames (REQUEST, ...) pass. |
+| RX (3) | UART | `addSrcPortDrop(0, 0x10)`, `addRule(any, 0x10)` | **no RC_STATE (port 0x10) reaches the vehicle from any source** (the vehicle takes no handset channels over the radio; second layer behind the TX module). Other node 0 frames (REQUEST, ...) pass. |
+| RX (3) | UART | `addSrcPortDrop(1 / 2 / 3, 0x13)` | **CMD_STATE reaches the vehicle only from node 0** (src 0 preserved). A forged source on the air is dropped. |
+| RX (3) | air | `addRule(uart, 0x13)` | CMD_STATE coming from the vehicle side is never put on the air (uplink only, anti-spoof, whatever source it claims) |
 | RX (3) | UART | `addDstDrop(0)`, `portLimit 0x80` | the vehicle is an end node and never forwards, frames for the ground station are useless there; USB-only ports |
 | RX (3) | air | `addDstDrop(1)`, `portLimit 0x80` | nothing addressed to the vehicle goes back on the air; USB-only ports |
 
@@ -200,10 +205,12 @@ User decision 2026-11-19: **only the ground station's HEARTBEAT is dropped over 
 
 The topology is fixed, so both routers pin their unicast routes (`Node::pinRoute`, new in ExVectrNetwork): TX module: node 1 and node 3 → air, node 0 → USB. RX module: node 1 → UART, node 0 and node 2 → air. Without pins a single frame with a forged source (for example the bench injection of `HANDSET_TELEM` with src 1 over USB) made the TX module learn "node 1 is on USB" and send the Pocket's RC_STATE there for the 3 s route lifetime, where the dst-1 drop discarded it. Pinning keeps RC_STATE on the air link whatever arrives on USB (host test `test_e2e_gs_heartbeat_and_rc_never_reach_uart_but_request_does`).
 
-### RC state
+### RC state and CMD_STATE (GS-as-control-source, `feature/cmd-uplink`)
 
-- The TX module originates `RC_STATE` only from CRSF frames (one per frame, no timer path). If the Pocket stops, nothing is originated; the queued state expires at 100 ms and is never released later (host-tested at the slot level and end to end).
-- The RX module never creates RC state. Silence on the air is silence on the UART, and the vehicle's control timeout runs. No retransmission of expired data.
+- The TX module originates `RC_STATE` only from CRSF frames (one per frame, no timer path) and sends it to the ground station on USB (dst 0) **only**. It is never on the air and never on the vehicle UART. No `pocket_rc_to_air` flag exists: the ship node drops port 0x10 toward the UART unconditionally, so such a flag would have no effect; add it together with that drop if a profile ever needs the handset on the air.
+- `CMD_STATE` (port 0x13, 14 B, node 0 -> vehicle node 1, design `docs/gs-control-design.md`) arrives on the Router's USB at 25 Hz (plus immediate on-change frames) from the ground station and is forwarded over the air as received: qos/latest flags and sequence unchanged, src 0 preserved, no parsing. The sender must use QoS control and LATEST: the aggregator classes and keys the frame by those header bits (key src/dst/port, so one slot, newest wins, expiry 100 ms evaluated at the slot start). The ship node puts it on the UART with src 0. Uplink only: both routers drop 0x13 in the other direction. Air cost: 21 B x 25/s = 525 B/s; uplink total about 611 B/s = 9.9 % of the 6.15 kB/s entry capacity (`tools/network_budget.py`).
+- Not implemented (the brief asked for latest-wins only): the design's USB-ingress token bucket (50/s, burst 2). A sender faster than 25 Hz cannot raise the air load (latest-wins replaces in place), it only wastes USB and CPU.
+- Silence on the air is silence on the UART, and the vehicle's command timeout runs. No retransmission of expired data. The RX module never creates command state.
 
 ## CRSF (TX module)
 
@@ -233,6 +240,37 @@ One telemetry frame is queued as the handset reply after each RC frame (`CrsfTel
 | `0x08 BATTERY_SENSOR` | `HANDSET_TELEM.battery` | voltage in 100 mV, only when the wire value is not 0 |
 
 - Round robin, one frame per handset frame, each kind at most 10 Hz. Sources are fixed: `LINK_STATS` from node 3 only, `HANDSET_TELEM` from node 1 only. Telemetry frames stop when the last `HANDSET_TELEM` is 3 s old.
+
+### RC stream diagnostics and CRSF parser hardening (`feature/rc-stream-instrumentation`)
+
+The shared CRSF framing is `src/CrsfParser.hpp` (pure class, host-tested in `test/test_crsf_parser`). **Legacy mode is the default and is exactly the old `decodeByte()`** (what every FPV firmware runs; a random-stream test compares it with a copy of the original). The network TX module calls `crsf.setHardenedParser(true)`:
+
+- 0x00 is not accepted as a frame start (FPV starts: 0xC8, 0x00, 0xEC, 0xEA, 0xEE; hardened: without 0x00). A 0x00 is what a break or the `switchToTx` constant-low RX routing looks like.
+- After a bad length or CRC failure the bytes behind the first one are rescanned for a real start instead of being discarded (one corrupt byte costs one frame, not the next 2 to 64 bytes).
+- A half-received frame with no new byte for 20 ms is dropped (`staleResets`). This is a poll-to-poll timeout, not the 1 ms inter-byte gap: bytes are read from the UART FIFO in chunks without per-byte timestamps, so a 1 ms gap cannot be told from a loop pause, and the rescan already covers the desync.
+- The main loop uses `crsf.queuedFrames()` instead of `peekFrameType() != 0`, so a CRC-valid type-0 frame at the queue front is dropped (not a loop end), and a failed RC `read()` (frame already removed) no longer causes the next frame to be discarded unseen.
+
+Counters leave as **LOG_TEXT** lines to the ground station at 1 Hz (no ExVectrPackets field has spare room; `LinkStats` has none and the schema is being changed elsewhere). They are dropped while no USB host is attached. Read them in the ground-station log view / recording (severity Info for `RCDIAG`, Warning for `RCFROZEN`):
+
+`RCDIAG b= rc= lua= oth= crc= len= drop= z0= resc= stale= rcAge= anyAge= off= sf= rep=sent/replaced`
+
+| Field | Meaning |
+|---|---|
+| `b` | UART bytes received (cumulative) |
+| `rc` / `lua` / `oth` | CRC-valid frames: RC 0x16 / Lua 0x28, 0x2C, 0x2D / anything else |
+| `crc` / `len` | CRC failures / bad-length resets |
+| `drop` | bytes discarded while hunting for a frame start |
+| `z0` | 0x00 seen as a tentative frame start (always 0 in hardened mode, which no longer accepts it) |
+| `resc` / `stale` | rescans after a failure / stale partial frames dropped |
+| `rcAge` / `anyAge` | ms since the last RC frame / last valid frame of any kind (-1 = none yet; loop granularity) |
+| `off` / `sf` | `rcFramesOffered` / `rcSendFailed` of the router |
+| `rep` | half-duplex replies sent / queued replies overwritten before they could go out (`write()` replacing DeviceInfo with telemetry) |
+
+`RCFROZEN atMs= bytesIn= last16: xx ...` appears every second once RC has been silent for 200 ms and stays until RC returns; the 16 bytes are the last raw UART bytes at that moment (frozen copy).
+
+How to read a stall: `b` still rising and `lua`/`oth` rising but `rc` flat = the handset sends no 0x16 (hypothesis 1; check `rep` replaced > 0 and the frozen bytes for a repeating 0x28 ping pattern). `b` rising, nothing valid, `crc`/`len`/`drop` rising = parser desync or line noise (frozen bytes show what is on the wire). `b` flat = nothing arrives at the UART (handset silent, or RX wedged). `rc` rising but `off` flat is impossible (same call); `off` rising with `sf` rising = the air side refuses RC_STATE, not a CRSF problem.
+
+Cost: FPV TX-module env flash +620 bytes, RAM +80 bytes (counters, 16-byte ring, parser object); behaviour unchanged.
 
 ## WiFi upload and failsafes
 
@@ -299,8 +337,8 @@ Decision 2026-11-20. `REQUEST` with `action = LINK_REBOOT (11)` has exactly the 
 - `test/test_fhss` (env `native_fhss`, C++20, compiles the real `FHSS.cpp` with ExVectrCore and a fake clock and fake radios):
   - **FPV golden trace:** everything both FPV ends transmit in 3 s (bytes, channels, slot timing in µs) hashes to the value recorded from the unmodified FHSS. Any change to the FPV air format or timing fails it.
   - Network profile: parameters and trailer limits; lock from Searching; full 255-byte frames; the follower never transmits before Synced; 25 packets/s each way, own TX slot every 40 ms; sync held with 20 ppm mismatch; recovery after a 5 s block; FPV and network never accept each other.
-- `test/test_air_link` (env `native`): also the power policy (default 10 dBm, ceiling clamp, `LinkConfigFollower` apply and 10 s fail-safe), `LINK_CONFIG` (bytes, 2 Hz unicast from the Router, USB drop with forged source, ship accept rules, end-to-end mirroring and link-loss fall-back), `ShipRebootRequester` (retry, ack, end to end) and `NetLuaMenu` (levels/options, every entry parsed by an independent decoder, writes, command confirmation flow). Time on air (10.56 ms, and 10.38 ms with 8 symbols/no CRC), slot budget, expected rates, slot roles, trailer seeds and counters (FPV golden values), phase wrap and filter steps; LQ counter; RC_STATE expiry evaluated at the slot start; priority order; downlink fill (≥ 5 kB/s); mailbox, keep-alive, corrupted packet, LQ, LINK_STATS fields, SFC; direction; RX router filters both ways (node 0 heartbeat and RC_STATE dropped at the UART egress, node 0 REQUEST passes, REQUEST_ACK to node 0 goes on the air), link upload command on the RX module (UART and air, ACK content and addressing, delay, repeated id, wrong target/action/short/id 0), LINK_STATS 5 Hz with LQ 0 / Searching, no RC state without air; upload triggers; power policy; no heap use; end to end (TX router + air + RX router over simulated slots): RC_STATE at 25 Hz on the RX UART, no ground-station heartbeat or RC_STATE on the UART (including a forged source) while its REQUESTs do reach it, REQUEST_ACK from the vehicle reaches USB, upload command to the RX module over the air (ACK reaches USB before the module is due) and to the TX module, Pocket off → silence, no stale release after a 5 s block.
-- `test/test_network_mode` (env `native`): the TX router (CRSF mapping, filters, heartbeat, telemetry conversions, round robin), now against the real air access. Filters: node 0 heartbeat and RC_STATE (from USB) never on air; node 0 REQUEST, broadcast data pass; dst 0 never on air. Link upload command on the TX module (USB and air, ACK content and addressing, delay, idempotence, wrong target/action/short/id 0, a request for node 3 is forwarded and not executed).
+- `test/test_air_link` (env `native`): also the power policy (default 10 dBm, ceiling clamp, `LinkConfigFollower` apply and 10 s fail-safe), `LINK_CONFIG` (bytes, 2 Hz unicast from the Router, USB drop with forged source, ship accept rules, end-to-end mirroring and link-loss fall-back), `ShipRebootRequester` (retry, ack, end to end) and `NetLuaMenu` (levels/options, every entry parsed by an independent decoder, writes, command confirmation flow). Time on air (10.56 ms, and 10.38 ms with 8 symbols/no CRC), slot budget, expected rates, slot roles, trailer seeds and counters (FPV golden values), phase wrap and filter steps; LQ counter; RC_STATE expiry evaluated at the slot start; priority order; downlink fill (≥ 5 kB/s); mailbox, keep-alive, corrupted packet, LQ, LINK_STATS fields, SFC; direction; RX router filters both ways (node 0 heartbeat dropped and no RC_STATE from any source at the UART egress, CMD_STATE from node 0 passes and from 1/2/3 is dropped, CMD_STATE from the UART never on air, downlink unaffected, node 0 REQUEST passes, REQUEST_ACK to node 0 goes on the air), link upload command on the RX module (UART and air, ACK content and addressing, delay, repeated id, wrong target/action/short/id 0), LINK_STATS 5 Hz with LQ 0 / Searching, no RC state without air; upload triggers; power policy; no heap use; end to end (TX router + air + RX router over simulated slots): CMD_STATE at 25 Hz on the RX UART, the Pocket's RC_STATE at 250 Hz never on the UART (it reaches USB), forged CMD_STATE sources 1/2/3 never on the UART, no ground-station heartbeat or RC_STATE on the UART while its REQUESTs do reach it, REQUEST_ACK from the vehicle reaches USB, upload command to the RX module over the air (ACK reaches USB before the module is due) and to the TX module, GS stream off → silence, no stale CMD_STATE release after a 5 s block.
+- `test/test_network_mode` (env `native`): the TX router (CRSF mapping, filters, heartbeat, telemetry conversions, round robin), now against the real air access. Filters: node 0 heartbeat never on air; RC_STATE (any source or origin, including the Pocket) never on air and still on USB; CMD_STATE from node 0 on USB forwarded (bytes unchanged), from nodes 1/2/3 dropped, never to USB; latest-wins (one per slot, newest, no resend); 25 Hz stream one per slot; node 0 REQUEST, broadcast data pass; dst 0 never on air. Link upload command on the TX module (USB and air, ACK content and addressing, delay, idempotence, wrong target/action/short/id 0, a request for node 3 is forwarded and not executed).
 
 ## Bench plan (user, hardware)
 
@@ -308,12 +346,12 @@ Hardware: the TX module (Pocket) flashed with `exvectrlink_tx_module_network`, a
 
 1. **Sync:** power both. The receiver's `LINK_STATS` (on the UART, 5 Hz) goes from air state 1 (Searching) to 3 (Synced) within a few seconds. The TX module's `LINK_STATS` (on USB, 2 Hz) shows Synced. Leave it running for 10 minutes: no return to Searching, air rx ok counting at 25/s on both ends.
 2. **LQ on both ends:** with the modules a few metres apart, rx LQ ≥ 95 % in both `LINK_STATS`; RSSI/SNR plausible. The Pocket's telemetry screen shows uplink LQ/RSSI (from node 3) and downlink LQ/RSSI (TX module).
-3. **Uplink RC_STATE at 25 Hz:** count `RC_STATE` frames (port 0x10, src 2, dst 1) on the receiver UART over 10 s: about 250. Move the Pocket sticks: the values follow (-1000..1000, centre 0).
+3. **Uplink CMD_STATE at 25 Hz (GS-control):** count `CMD_STATE` frames (port 0x13, src 0, dst 1) on the receiver UART over 10 s: about 250. **No port 0x10 frame** on the UART with the Pocket on. The Pocket's `RC_STATE` still reaches the ground station on the Router USB (about 200/s).
 4. **Downlink throughput:** have the UART host send telemetry above the air capacity (for example 40 latest-wins streams of 40-byte frames, port 0x20..0x47, dst 0, every 40 ms). Measure the frame bytes arriving at the ground station: at least 5 kB/s (about 6 kB/s expected). Receiver `LINK_STATS` queue peak high, frames expired/dropped counting, sync unaffected.
-5. **RF block of 5 s:** shield one end or unplug the antennas for 5 s. After about 3 s the receiver reports Searching and LQ 0 (still at 5 Hz on the UART); RC_STATE stops on the UART within about 140 ms of the block. After the block the link is Synced again within a few seconds and RC_STATE resumes **without a burst of old frames** (check sequence numbers and arrival times).
-6. **Ground-station traffic over radio:** with the ground station connected on the TX module's USB: (a) a ground-station `REQUEST` to the vehicle (for example a calibration start) **reaches the receiver UART** (src 0, dst 1, port 0x11), and the vehicle's `REQUEST_ACK` comes back to the ground station; (b) the ground station's **heartbeat does not** appear on the UART; (c) **RC_STATE from the ground station does not** appear on the UART (enable the ground station's virtual radio on the TX-module source if the GUI allows it; only the Pocket's RC_STATE, src 2, shows); (d) the same with RC_STATE injected over USB with src 1.
-7. **Pocket off:** switch the Pocket off (or stop CRSF): RC_STATE on the UART stops within about 140 ms; nothing is repeated.
-8. **Injection over USB** (unchanged bench step from the USB-side task): inject `HANDSET_TELEM` (src 1) and `LINK_STATS` (src 3) from the ground-station side. The Pocket shows them, and the Pocket's RC_STATE keeps reaching the receiver UART throughout (pinned routes).
+5. **RF block of 5 s:** shield one end or unplug the antennas for 5 s. After about 3 s the receiver reports Searching and LQ 0 (still at 5 Hz on the UART); CMD_STATE stops on the UART within about 140 ms of the block. After the block the link is Synced again within a few seconds and CMD_STATE resumes **without a burst of old frames** (check sequence numbers and arrival times).
+6. **Ground-station traffic over radio:** with the ground station connected on the TX module's USB: (a) a ground-station `REQUEST` to the vehicle (for example a calibration start) **reaches the receiver UART** (src 0, dst 1, port 0x11), and the vehicle's `REQUEST_ACK` comes back to the ground station; (b) the ground station's **heartbeat does not** appear on the UART; (c) **no RC_STATE** (port 0x10) appears on the UART whatever its source; (d) `CMD_STATE` injected over USB with src 1, 2 or 3 does **not** appear on the UART, only src 0 does.
+7. **GS stream stops:** stop the ground station's command stream: CMD_STATE on the UART stops within about 140 ms; nothing is repeated. Switching the Pocket off changes nothing on the UART.
+8. **Injection over USB** (unchanged bench step from the USB-side task): inject `HANDSET_TELEM` (src 1) and `LINK_STATS` (src 3) from the ground-station side. The Pocket shows them, and the ground station's CMD_STATE keeps reaching the receiver UART throughout (pinned routes).
 9. **Power and Lua menu:**
    a. Power both ends: both `LINK_STATS` (Router on USB, ship node over the UART) show `tx_power` 10 and the Pocket shows 10 mW. Open the Lua menu on the Pocket (System > Tools > ExpressLRS script, or the external-module script): the entries 1-7 of "Lua menu (Router)" appear, `Power (10mW legal)` shows 10, `Link` shows Synced, `Ship power` shows `10 dBm`.
    b. Raise the power to 20 dBm: the Router's `LINK_STATS` `tx_power` becomes 20 at once, the ship node's becomes 12 (board maximum) within about 0.5 s, the Pocket's power index follows. Lower to 5: both follow. RSSI at the other end moves with it (spectrum or RSSI check, power meter if available).

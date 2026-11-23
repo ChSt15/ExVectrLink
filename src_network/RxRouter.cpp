@@ -23,22 +23,28 @@ RxRouter::RxRouter(network::TimeSourceI &time, network::FrameLinkI &uart, networ
   node_.setDataSink(mux_);
   mux_.subscribe(Packets::LinkConfig::kPort, linkConfig_);
 
-  // Where frames must not go (design 3.3.3, Revision 1, docs/network-mode.md "Filters"):
-  //  - UART (to the vehicle): from node 0 only the heartbeat and RC_STATE are dropped (second layer behind the TX
-  //    module: no RC from the ground station over radio ever reaches the vehicle); its REQUESTs and other frames
-  //    pass. Nothing addressed to the ground station (the vehicle is an end node and never forwards), no USB-only
-  //    ports.
-  //  - Air: nothing addressed to the vehicle (Node::send floods unicast frames without a route), no USB-only ports.
+  // Where frames must not go (design 3.3.3, docs/network-mode.md "Filters", docs/gs-control-design.md section 7):
+  //  - UART (to the vehicle): the ground station's heartbeat is dropped; its REQUESTs and other frames pass.
+  //    RC_STATE (0x10) from any source is dropped (the vehicle takes no handset channels over the radio). CMD_STATE
+  //    (0x13) passes only from node 0 arriving over the air: it is dropped for sources 1, 2 and 3. Nothing
+  //    addressed to the ground station (the vehicle is an end node and never forwards), no USB-only ports.
+  //  - Air: nothing addressed to the vehicle (Node::send floods unicast frames without a route), no USB-only ports,
+  //    and no CMD_STATE that came in from the vehicle side (uplink only, anti-spoof).
   EgressFilter uartFilter;
   uartFilter.portLimit = 0x80;
   uartFilter.addHeartbeatDrop(kGroundStation);
   uartFilter.addSrcPortDrop(kGroundStation, Packets::RcState::kPort);
+  uartFilter.addRule(network::kAnyLink, Packets::RcState::kPort);
+  uartFilter.addSrcPortDrop(kVehicle, kCmdStatePort);
+  uartFilter.addSrcPortDrop(2, kCmdStatePort);
+  uartFilter.addSrcPortDrop(kNodeId, kCmdStatePort);
   uartFilter.addDstDrop(kGroundStation);
   uartIdx_ = node_.addLink(uart, uartFilter);
 
   EgressFilter airFilter;
   airFilter.portLimit = 0x80;
   airFilter.addDstDrop(kVehicle);
+  if (uartIdx_ >= 0) airFilter.addRule(static_cast<uint8_t>(uartIdx_), kCmdStatePort);
   airIdx_ = node_.addLink(air, airFilter);
   linkConfig_.setAirLink(airIdx_);
 
