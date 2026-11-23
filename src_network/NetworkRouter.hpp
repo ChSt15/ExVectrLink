@@ -27,13 +27,14 @@ public:
   static constexpr uint8_t kVehicle = 1;
   static constexpr uint8_t kRxModule = 3;
   static constexpr uint8_t kRcStatePort = Packets::RcState::kPort;
+  static constexpr uint8_t kCmdStatePort = Packets::CmdState::kPort; // 0x13, node 0 -> vehicle, uplink only
   static constexpr int64_t kRcSourceTimeoutNs = 100000000LL; // 100 ms
   static constexpr int64_t kLinkStatsPeriodNs = 500000000LL; // 2 Hz (schema air rate)
   static constexpr int64_t kLinkConfigPeriodNs = 500000000LL; // 2 Hz (schema air rate)
 
   struct RouterStats {
     uint32_t rcFramesOffered = 0; ///< CRSF RC frames turned into RC_STATE
-    uint32_t rcSendFailed = 0;    ///< RC_STATE copies no link accepted
+    uint32_t rcSendFailed = 0;    ///< RC_STATE copies (USB) no link accepted
   } stats;
 
   /// `usb` and `air` are the raw datalinks. `usbGate` (optional) refuses frames while the host is absent or the
@@ -44,8 +45,8 @@ public:
   /// Periodic work (heartbeat, own LINK_STATS). Call at least at 10 Hz, together with the links' poll().
   void poll();
 
-  /// One CRSF RC_CHANNELS_PACKED frame (16 raw 11-bit values) arrived. Replaces the queued state: offers
-  /// RC_STATE to the air side (dst 1) and to USB (dst 0). Called once per CRSF frame, and never otherwise:
+  /// One CRSF RC_CHANNELS_PACKED frame (16 raw 11-bit values) arrived. Offers RC_STATE to USB (dst 0)
+  /// only; it never goes on the air (CMD_STATE from the ground station replaces it). Called once per CRSF frame, and never otherwise:
   /// RC state is not synthesised or repeated.
   void onCrsfRcFrame(const uint16_t channels[16]);
 

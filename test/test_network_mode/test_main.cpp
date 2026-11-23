@@ -123,6 +123,13 @@ static Frame makePacket(uint8_t src, uint8_t dst, uint8_t seq, const T &p, net::
   return makeData(src, dst, T::kPort, seq, buf, n, qos, latest);
 }
 
+/// CMD_STATE (port 0x13, 14 B). The Router never parses it; byte 0 carries `tag` to tell frames apart.
+static Frame cmdState(uint8_t src, uint8_t dst, uint8_t seq, uint8_t tag = 0) {
+  uint8_t pl[Packets::CmdState::kMaxSize] = {};
+  pl[0] = tag;
+  return makeData(src, dst, Packets::CmdState::kPort, seq, pl, sizeof pl, net::wire::Qos::Control, true);
+}
+
 static bool isData(const uint8_t *f, uint8_t len, uint8_t port) {
   return len >= 6 && (f[0] & 0x30) == 0 && f[4] == port;
 }
@@ -268,7 +275,7 @@ void test_crsf_channel_pack_roundtrip() {
 // Router: RC_STATE out, expiry, filters, heartbeat
 // ---------------------------------------------------------------------------------------------------------
 
-void test_rc_state_goes_to_air_dst1_and_usb_dst0() {
+void test_rc_state_goes_to_usb_dst0_only_never_on_air() {
   Rig r;
   uint16_t ch[16];
   rawChannels(ch, 992);
@@ -292,16 +299,14 @@ void test_rc_state_goes_to_air_dst1_and_usb_dst0() {
   // No dst-1 copy on USB
   TEST_ASSERT_EQUAL_INT(0, countUsb(r.usb, 0x10, 1));
 
-  // Air: exactly one RC_STATE, dst 1, and never a dst-0 copy
+  // Air: no RC_STATE at all (GS-control: the handset's channels leave the air completely)
   AirContents a = drainAir(r.air, r.clk.nowNs());
-  TEST_ASSERT_EQUAL_INT(1, a.count(0x10));
-  TEST_ASSERT_EQUAL_INT(1, a.count(0x10, 1, 2));
-  TEST_ASSERT_EQUAL_INT(0, a.count(0x10, 0));
-  TEST_ASSERT_EQUAL_UINT32(2, r.router.stats.rcFramesOffered * 2); // 1 frame, two copies offered
+  TEST_ASSERT_EQUAL_INT(0, a.count(0x10));
+  TEST_ASSERT_EQUAL_UINT32(1, r.router.stats.rcFramesOffered);
   TEST_ASSERT_EQUAL_UINT32(0, r.router.stats.rcSendFailed);
 }
 
-void test_each_frame_replaces_queued_state() {
+void test_each_crsf_frame_goes_to_usb_and_nothing_to_air() {
   Rig r;
   uint16_t ch[16];
   for (int k = 0; k < 6; k++) {
@@ -309,13 +314,9 @@ void test_each_frame_replaces_queued_state() {
     r.router.onCrsfRcFrame(ch);
     r.clk.advanceMs(4);
   }
+  TEST_ASSERT_EQUAL_INT(6, countUsb(r.usb, 0x10, 0, 2)); // the GS gets every handset frame
   AirContents a = drainAir(r.air, r.clk.nowNs());
-  TEST_ASSERT_EQUAL_INT(1, a.count(0x10)); // one queued state, the newest
-  Packets::RcState rc;
-  const Frame *f = a.find(0x10);
-  TEST_ASSERT_NOT_NULL(f);
-  TEST_ASSERT_TRUE(rc.decode(f->d + 6, f->len - 6));
-  TEST_ASSERT_EQUAL_INT16(crsfToRcChannel(992 + 250), rc.ch[0]);
+  TEST_ASSERT_EQUAL_INT(0, a.count(0x10));
 }
 
 void test_expiry_100ms_and_no_reemission() {
@@ -352,19 +353,19 @@ void test_expiry_100ms_and_no_reemission() {
   rawChannels(ch, 800);
   r.router.onCrsfRcFrame(ch);
   AirContents c = drainAir(r.air, r.clk.nowNs());
-  TEST_ASSERT_EQUAL_INT(1, c.count(0x10));
+  TEST_ASSERT_EQUAL_INT(0, c.count(0x10)); // never on the air
+  TEST_ASSERT_EQUAL_INT(rcOnUsb + 1, countUsb(r.usb, 0x10));
   TEST_ASSERT_TRUE(r.router.rcSourceFresh());
 }
 
 void test_expired_state_not_released_after_air_stall() {
-  // The air side is not drained for 150 ms (no slot): the queued RC_STATE must be dropped, not sent late.
+  // The air side is not drained for 150 ms (no slot): the queued CMD_STATE must be dropped, not sent late.
   Rig r;
-  uint16_t ch[16];
-  rawChannels(ch, 1200);
-  r.router.onCrsfRcFrame(ch);
+  Frame c = cmdState(0, 1, 1);
+  r.usb.inject(c.d, c.len);
   r.clk.advanceMs(150);
   AirContents a = drainAir(r.air, r.clk.nowNs());
-  TEST_ASSERT_EQUAL_INT(0, a.count(0x10));
+  TEST_ASSERT_EQUAL_INT(0, a.count(0x13));
 }
 
 void test_usb_host_absent_only_stops_usb() {
@@ -377,7 +378,7 @@ void test_usb_host_absent_only_stops_usb() {
   TEST_ASSERT_EQUAL_INT(0, (int)r.usb.sent.size());
   TEST_ASSERT_TRUE(r.router.usbGuard().guardStats.droppedByGate > 0);
   AirContents a = drainAir(r.air, r.clk.nowNs());
-  TEST_ASSERT_EQUAL_INT(1, a.count(0x10, 1));
+  TEST_ASSERT_EQUAL_INT(0, a.count(0x10));
   TEST_ASSERT_EQUAL_INT(1, a.heartbeats(2)); // the module still announces itself on the air side
 
   // Host returns later: nothing from the outage is released.
@@ -835,6 +836,109 @@ void test_filter_only_gs_heartbeat_and_rc_state_dropped_on_air() {
   TEST_ASSERT_EQUAL_INT(0, a.count(0x30, 0, 0));
 }
 
+void test_cmd_state_forwarding_matrix_router() {
+  // Port 0x13 crosses to the air only when it is from node 0 and arrived on USB.
+  {
+    Rig r;
+    Frame f = cmdState(0, 1, 1, 0xA1);
+    r.usb.inject(f.d, f.len);
+    AirContents a = drainAir(r.air, r.clk.nowNs());
+    TEST_ASSERT_EQUAL_INT(1, a.count(0x13));
+    TEST_ASSERT_EQUAL_INT(1, a.count(0x13, 1, 0)); // dst 1, src 0 preserved
+    const Frame *g = a.find(0x13);
+    TEST_ASSERT_NOT_NULL(g);
+    TEST_ASSERT_EQUAL_UINT8(0x02, g->d[0] & 0x0F);   // QoS control, latest-wins flag kept
+    TEST_ASSERT_EQUAL_UINT8(0xA1, g->d[6]);          // payload untouched
+    TEST_ASSERT_EQUAL_UINT(6 + Packets::CmdState::kMaxSize, g->len);
+    TEST_ASSERT_EQUAL_INT(0, countUsb(r.usb, 0x13)); // never echoed on USB
+  }
+  for (uint8_t src = 1; src <= 3; src++) { // forged sources over USB
+    Rig r;
+    Frame f = cmdState(src, 1, 1);
+    r.usb.inject(f.d, f.len);
+    AirContents a = drainAir(r.air, r.clk.nowNs());
+    TEST_ASSERT_EQUAL_INT(0, a.count(0x13));
+    if (src != 2) TEST_ASSERT_TRUE(r.router.node().stats.egressFiltered >= 1); // src 2 is this node: dropped as self-echo
+  }
+  { // from the air side (vehicle direction): never forwarded to USB, whatever the source
+    Rig r;
+    for (uint8_t src = 0; src <= 3; src++) {
+      Frame f = cmdState(src, 0, src);
+      injectFromAir(r.air, r.clk, f);
+    }
+    TEST_ASSERT_EQUAL_INT(0, countUsb(r.usb, 0x13));
+  }
+}
+
+void test_cmd_state_other_traffic_unchanged_router() {
+  Rig r;
+  Packets::RcState rc;
+  rc.flags = 1;
+  const uint8_t pl[12] = {1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+  Frame cmd = cmdState(0, 1, 1);
+  r.usb.inject(cmd.d, cmd.len);
+  Frame rc0 = makePacket(0, 1, 2, rc, net::wire::Qos::Control); // RC-like node-0 traffic: never on air
+  r.usb.inject(rc0.d, rc0.len);
+  Frame req = makeData(0, 1, 0x11, 3, pl, sizeof pl, net::wire::Qos::Event, false); // REQUEST still forwarded
+  r.usb.inject(req.d, req.len);
+  Frame hb0 = makeHeartbeat(0, 0); // GS heartbeat still dropped over radio
+  r.usb.inject(hb0.d, hb0.len);
+  uint16_t ch[16];
+  rawChannels(ch, 1100);
+  r.router.onCrsfRcFrame(ch); // handset RC_STATE: USB only
+  AirContents a = drainAir(r.air, r.clk.nowNs());
+  TEST_ASSERT_EQUAL_INT(1, a.count(0x13, 1, 0));
+  TEST_ASSERT_EQUAL_INT(1, a.count(0x11, 1, 0));
+  TEST_ASSERT_EQUAL_INT(0, a.count(0x10));
+  TEST_ASSERT_EQUAL_INT(0, a.heartbeats(0));
+  TEST_ASSERT_EQUAL_INT(1, countUsb(r.usb, 0x10, 0, 2)); // handset still reaches the GS on USB
+
+  // Downlink unaffected: vehicle frames from the air still reach USB.
+  Packets::RequestAck ack;
+  ack.req_id = 4;
+  Frame ak = makePacket(1, 0, 1, ack, net::wire::Qos::Event, false);
+  injectFromAir(r.air, r.clk, ak);
+  Frame tm = makeData(1, 0, 0x20, 1, pl, sizeof pl);
+  injectFromAir(r.air, r.clk, tm);
+  TEST_ASSERT_EQUAL_INT(1, countUsb(r.usb, 0x12, 0, 1));
+  TEST_ASSERT_EQUAL_INT(1, countUsb(r.usb, 0x20, 0, 1));
+}
+
+void test_cmd_state_latest_wins_one_per_slot() {
+  Rig r;
+  for (uint8_t k = 0; k < 3; k++) {
+    Frame f = cmdState(0, 1, k, static_cast<uint8_t>(0x10 + k));
+    r.usb.inject(f.d, f.len);
+    r.clk.advanceMs(5);
+  }
+  AirContents a = drainAir(r.air, r.clk.nowNs());
+  TEST_ASSERT_EQUAL_INT(1, a.count(0x13)); // one CMD_STATE in the slot
+  const Frame *g = a.find(0x13);
+  TEST_ASSERT_NOT_NULL(g);
+  TEST_ASSERT_EQUAL_UINT8(0x12, g->d[6]); // the newest
+  // The next slot has nothing to resend: no repetition of an old state.
+  r.clk.advanceMs(40);
+  AirContents b = drainAir(r.air, r.clk.nowNs());
+  TEST_ASSERT_EQUAL_INT(0, b.count(0x13));
+}
+
+void test_cmd_state_25hz_stream_one_per_slot_no_loss() {
+  Rig r;
+  int onAir = 0;
+  for (int i = 0; i < 25; i++) {
+    Frame f = cmdState(0, 1, static_cast<uint8_t>(i));
+    r.usb.inject(f.d, f.len);
+    if (i % 5 == 0) { // an immediate on-change frame between the periodic ones
+      Frame g = cmdState(0, 1, static_cast<uint8_t>(100 + i));
+      r.usb.inject(g.d, g.len);
+    }
+    r.clk.advanceMs(1);
+    onAir += drainAir(r.air, r.clk.nowNs()).count(0x13);
+    r.clk.advanceMs(39);
+  }
+  TEST_ASSERT_EQUAL_INT(25, onAir);
+}
+
 void test_vehicle_request_ack_reaches_usb() {
   Rig r;
   Packets::RequestAck ack;
@@ -1052,8 +1156,8 @@ int main() {
   RUN_TEST(test_mapping_is_monotonic_and_bounded);
   RUN_TEST(test_rcstate_all_channels_and_source_ok);
   RUN_TEST(test_crsf_channel_pack_roundtrip);
-  RUN_TEST(test_rc_state_goes_to_air_dst1_and_usb_dst0);
-  RUN_TEST(test_each_frame_replaces_queued_state);
+  RUN_TEST(test_rc_state_goes_to_usb_dst0_only_never_on_air);
+  RUN_TEST(test_each_crsf_frame_goes_to_usb_and_nothing_to_air);
   RUN_TEST(test_expiry_100ms_and_no_reemission);
   RUN_TEST(test_expired_state_not_released_after_air_stall);
   RUN_TEST(test_usb_host_absent_only_stops_usb);
@@ -1080,6 +1184,10 @@ int main() {
   RUN_TEST(test_log_text_goes_to_usb_not_air);
   RUN_TEST(test_no_heap_use_after_construction);
   RUN_TEST(test_filter_only_gs_heartbeat_and_rc_state_dropped_on_air);
+  RUN_TEST(test_cmd_state_forwarding_matrix_router);
+  RUN_TEST(test_cmd_state_other_traffic_unchanged_router);
+  RUN_TEST(test_cmd_state_latest_wins_one_per_slot);
+  RUN_TEST(test_cmd_state_25hz_stream_one_per_slot_no_loss);
   RUN_TEST(test_vehicle_request_ack_reaches_usb);
   RUN_TEST(test_reboot_cmd_acked_then_due_after_delay_upload_not_due);
   RUN_TEST(test_reboot_cmd_idempotent_from_first_copy_and_ignored_cases);

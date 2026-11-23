@@ -49,6 +49,7 @@ public:
   static constexpr uint8_t kNodeId = 3; // RX module
   static constexpr uint8_t kGroundStation = 0;
   static constexpr uint8_t kVehicle = 1;
+  static constexpr uint8_t kCmdStatePort = Packets::CmdState::kPort; // 0x13, node 0 -> vehicle, uplink only
   static constexpr int64_t kLinkStatsPeriodNs = 200000000LL; // 5 Hz
 
   /// `boardMaxDbm`: the board's transmit power maximum, the ceiling of the power LINK_CONFIG can request.
