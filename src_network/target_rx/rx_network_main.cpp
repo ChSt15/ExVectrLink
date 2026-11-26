@@ -82,6 +82,16 @@ void applyDesiredPower() {
 UploadTriggers *triggers = nullptr;
 bool linkStopped = false;
 
+/// AIRDIAG line at 1 Hz (FHSS slot-path counters, docs/air-link-optimisation.md "AIRDIAG"). Read in the main loop only.
+AirDiagReporter airDiag;
+void airDiagUpdate() {
+  char line[240];
+  const size_t n = airDiag.poll(coreTime.nowNs(), netAirDiagInput(), line, sizeof line);
+  if (n == 0) return;
+  router.log(Packets::Severity::kInfo, line);
+  netFhss().resetSlotDiagWindow();
+}
+
 void enterUploadMode(const char *why) {
   router.log(Packets::Severity::kWarning, why); // queued for the air; may not get out before the link stops
   linkStopped = true;
@@ -133,6 +143,7 @@ void loop() {
   applyDesiredPower();
   airAccess.setStatus(netRadioStatus(currentPower)); // LINK_STATS tx_power = what this radio really uses
   router.poll();
+  airDiagUpdate();
   uartLink.poll(); // flush what the router just queued
 
   if (router.rebootCommandDue() && !linkStopped) rebootNow(); // ACK was sent 400 ms earlier (across the air)

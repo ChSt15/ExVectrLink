@@ -13,6 +13,7 @@
 #include "ExVectrLink/datalink/Sx1280Diversity.hpp"
 #include "ExVectrNetwork/TimeSourceI.hpp"
 
+#include "AirDiag.hpp"
 #include "NetAirAccess.hpp"
 #include "NetPower.hpp"
 
@@ -46,6 +47,9 @@ uint16_t netExpectedRxPerSecond(bool isRxSide);
 
 /// True while the FHSS has left Searching (for the sync failsafe).
 bool netRadioLeftSearching();
+
+/// Snapshot of the FHSS slot counters and the radio TX-done counts for the AIRDIAG line (call from the main loop).
+AirDiagInput netAirDiagInput();
 
 datalink::FHSS &netFhss();
 datalink::Sx1280Diversity &netDiversity();

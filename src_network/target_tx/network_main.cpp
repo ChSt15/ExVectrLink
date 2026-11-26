@@ -254,6 +254,16 @@ private:
 };
 RcDiag rcDiag;
 
+/// AIRDIAG line at 1 Hz (FHSS slot-path counters, docs/air-link-optimisation.md "AIRDIAG"). Read in the main loop only.
+AirDiagReporter airDiag;
+void airDiagUpdate(int64_t now) {
+  char line[240];
+  const size_t n = airDiag.poll(now, netAirDiagInput(), line, sizeof line);
+  if (n == 0) return;
+  router.log(Packets::Severity::kInfo, line);
+  netFhss().resetSlotDiagWindow();
+}
+
 void enterUploadMode(const char *why) {
   router.log(Packets::Severity::kWarning, why);
   usbLink.poll();
@@ -318,6 +328,7 @@ void loop() {
 
   crsf.available();
   rcDiag.update(coreTime.nowNs());
+  airDiagUpdate(coreTime.nowNs());
   bool paramHandled = false;
   // queuedFrames(), not peekFrameType() != 0: a CRC-valid type-0 frame at the front must be dropped below, not end
   // (or latch) this loop.

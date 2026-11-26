@@ -50,6 +50,8 @@ The PlatformIO binary on this machine is `~/.platformio/penv/bin/pio`. Run it fr
 ```
 
 - Every env is described in [docs/build-targets-and-hardware.md](docs/build-targets-and-hardware.md).
+- **The Starship ship node board (ESP8285) has an external PA and LNA: always flash `exvectrlink_rx_network_esp8285_pa` (RX/TX enable pins 9 and 10), never the plain `exvectrlink_rx_network_esp8285`.** The plain env does not switch the PA/LNA: the ship's downlink then loses 40 to 70 % of its packets while the uplink looks fine (found 2026-11-26 after a night of wasted link experiments). Any experiment env for the ship needs a `_pa` variant. Ship OTA address: 192.168.178.57 (WiFi, via the `LINK_UPLOAD_MODE` request, target 3).
+- Build the ESP32 TX env BEFORE the ESP8285 env: building an ESP8285 env replaces the `esptool` entry point in the shared PlatformIO penv (a wrapper `~/.platformio/penv/bin/esptool` calling `tool-esptoolpy` restores it).
 - Build at least one RX and one TX env for every change. Check that there are no new warnings in `src/`.
 - **`src/WifiCredentials.cpp` is gitignored and must exist.** It defines `const char *VCTR::WifiUpload::ssid` and `password`. Without it the link step fails with `undefined reference to VCTR::WifiUpload::ssid`.
 - The `*_ota` envs upload over WiFi to a fixed IP (`upload_port`). Use `--upload-port` to override it.

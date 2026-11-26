@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "ExVectrLink/datalink/AirProfile.hpp"
+#include "AirDiag.hpp"
 #include "ExVectrLink/datalink/FhssMath.hpp"
 #include "LinkUploadCommand.hpp"
 #include "NetAirAccess.hpp"
@@ -198,6 +199,27 @@ void test_slot_budget() {
   TEST_ASSERT_TRUE(dl::kNetworkProfileV1.wakeupLeadNs < dl::kNetworkProfileV1.slotIntervalNs / 4);
 }
 
+void test_wakeup_lead_build_flag() {
+  // Without -DEXVECTRLINK_NET_WAKEUP_LEAD_NS the network profiles keep the 2.5 ms lead; FPV never uses the constant.
+#ifndef EXVECTRLINK_NET_WAKEUP_LEAD_NS
+  TEST_ASSERT_EQUAL_INT64(2500000, dl::kNetworkWakeupLeadNs);
+#endif
+  TEST_ASSERT_EQUAL_INT64(dl::kNetworkWakeupLeadNs, dl::kNetworkProfileV1.wakeupLeadNs);
+  TEST_ASSERT_EQUAL_INT64(dl::kNetworkWakeupLeadNs, dl::kNetworkProfileV2Trial.wakeupLeadNs);
+  TEST_ASSERT_EQUAL_INT64(1000000, dl::kFpvProfile.wakeupLeadNs);
+  TEST_ASSERT_EQUAL_INT64(0, dl::kNetworkProfileV2Trial.wakeupLeadRxNs); // single lead for TX and RX slots
+  // v1 with the 3.5 ms experiment lead (the flag's value): frame ends 10.56 ms, wakeup at 16.5 ms
+  dl::AirProfile lead35 = dl::kNetworkProfileV1;
+  lead35.wakeupLeadNs = 3500000LL;
+  const auto t = dl::netSlotTiming(lead35);
+  TEST_ASSERT_TRUE(t.fitsStrict);
+  TEST_ASSERT_TRUE(t.fitsWithGrace);
+  TEST_ASSERT_INT64_WITHIN(5000, 5940000, t.wakeupSlackNs);
+  TEST_ASSERT_INT64_WITHIN(5000, 4940000, t.strictMarginNs);
+  TEST_ASSERT_INT64_WITHIN(5000, 5940000, t.ownTxDoneSlackNs);
+  TEST_ASSERT_EQUAL_INT64(3500000, dl::wakeupLeadForRx(lead35));
+}
+
 void test_v2_trial_profile_timing() {
   const auto &v1 = dl::kNetworkProfileV1;
   const auto &v2 = dl::kNetworkProfileV2Trial;
@@ -206,7 +228,7 @@ void test_v2_trial_profile_timing() {
   TEST_ASSERT_EQUAL_UINT32(v1.lora.bwHz, v2.lora.bwHz);
   TEST_ASSERT_EQUAL_UINT8(v1.lora.cr, v2.lora.cr);
   TEST_ASSERT_EQUAL_UINT8(v1.lora.preamble, v2.lora.preamble);
-  TEST_ASSERT_EQUAL_UINT8(255, v2.fixedFrameLength);
+  TEST_ASSERT_EQUAL_UINT8(220, v2.fixedFrameLength);
   TEST_ASSERT_EQUAL_UINT8(v2.fixedFrameLength, v2.onAirBytes);
   TEST_ASSERT_EQUAL_INT64(v1.slotIntervalNs, v2.slotIntervalNs);
   TEST_ASSERT_EQUAL_INT64(v1.wakeupLeadNs, v2.wakeupLeadNs);
@@ -222,29 +244,39 @@ void test_v2_trial_profile_timing() {
   TEST_ASSERT_TRUE(t1.fitsWithGrace);
   TEST_ASSERT_TRUE(t1.wakeupSlackNs > 0);
 
-  // v2-trial: 17.77 ms. Fails the strict 16.5 ms budget by 1.27 ms, frame still in flight at the wakeup (-0.27 ms),
-  // but ends 1.73 ms before the hard grace cutoff and keeps 0.73 ms of the 1 ms margin -> fits with grace.
+  // v2-trial, 220 B: 15.41 ms from the repo formula (SF6, BW1600, CR 4/5). Meets the strict 16.5 ms budget with
+  // 1.09 ms to spare, ends 2.09 ms before the wakeup before the own TX slot, 4.09 ms before the grace cutoff.
+  // Single 2.5 ms lead: the wakeup before an RX slot comes 2.09 ms after the own TX has ended.
   const auto t2 = dl::netSlotTiming(v2);
-  TEST_ASSERT_INT64_WITHIN(5000, 17772000, t2.toaNs);
-  TEST_ASSERT_FALSE(t2.fitsStrict);
-  TEST_ASSERT_INT64_WITHIN(5000, -1272000, t2.strictMarginNs);
-  TEST_ASSERT_INT64_WITHIN(5000, -272000, t2.wakeupSlackNs);
-  TEST_ASSERT_INT64_WITHIN(5000, 1728000, t2.graceMarginNs);
-  TEST_ASSERT_INT64_WITHIN(5000, 728000, t2.graceBudgetMarginNs);
-  TEST_ASSERT_INT64_WITHIN(5000, 2228000, t2.txPrepLeftNs);
-  // the own 17.77 ms TX has ended 1.23 ms before the wakeup of the following RX slot (lead 1.0 ms)
-  TEST_ASSERT_INT64_WITHIN(5000, 1228000, t2.ownTxDoneSlackNs);
-  TEST_ASSERT_EQUAL_INT64(1000000, dl::wakeupLeadForRx(v2));
+  TEST_ASSERT_INT64_WITHIN(5000, 15409000, t2.toaNs);
+  TEST_ASSERT_TRUE(t2.fitsStrict);
+  TEST_ASSERT_INT64_WITHIN(5000, 1091000, t2.strictMarginNs);
+  TEST_ASSERT_INT64_WITHIN(5000, 2091000, t2.wakeupSlackNs);
+  TEST_ASSERT_INT64_WITHIN(5000, 4091000, t2.graceMarginNs);
+  TEST_ASSERT_INT64_WITHIN(5000, 3091000, t2.graceBudgetMarginNs);
+  TEST_ASSERT_INT64_WITHIN(5000, 4591000, t2.txPrepLeftNs);
+  // the own 15.41 ms TX has ended 2.09 ms before the wakeup of the following RX slot (same 2.5 ms lead)
+  TEST_ASSERT_INT64_WITHIN(5000, 2091000, t2.ownTxDoneSlackNs);
+  TEST_ASSERT_EQUAL_INT64(dl::kNetworkWakeupLeadNs, dl::wakeupLeadForRx(v2));
   TEST_ASSERT_EQUAL_INT64(v1.wakeupLeadNs, dl::wakeupLeadForRx(v1)); // v1: one lead for both roles
   TEST_ASSERT_TRUE(t2.fitsWithGrace);
-  // the legacy guard check (3.5 ms) refuses it, as the design doc says
-  TEST_ASSERT_FALSE(fm::slotFits(v2.lora, v2.onAirBytes, v2.slotIntervalNs, 3500000));
 
-  // same frame with the usual 2.5 ms lead before the RX slot: the wakeup would cut the own TX -> refused
-  dl::AirProfile oneLead = v2;
-  oneLead.wakeupLeadRxNs = 0;
-  TEST_ASSERT_TRUE(dl::netSlotTiming(oneLead).ownTxDoneSlackNs < 0);
-  TEST_ASSERT_FALSE(dl::netSlotTiming(oneLead).fitsWithGrace);
+  // the earlier 255 B variant (17.77 ms) stays refused by the strict budget but accepted with grace and the short RX lead
+  // (kept covered because the 255 B path and the RX lead mechanism still exist in the code)
+  dl::AirProfile long255 = v2;
+  long255.fixedFrameLength = 255;
+  long255.onAirBytes = 255;
+  long255.wakeupLeadRxNs = 1000000LL; // the experimental short RX lead (mechanism kept, not used by the shipped profiles)
+  const auto t255 = dl::netSlotTiming(long255);
+  TEST_ASSERT_INT64_WITHIN(5000, 17772000, t255.toaNs);
+  TEST_ASSERT_FALSE(t255.fitsStrict);
+  TEST_ASSERT_TRUE(t255.fitsWithGrace);
+  TEST_ASSERT_INT64_WITHIN(5000, 1228000, t255.ownTxDoneSlackNs);
+  long255.wakeupLeadRxNs = 0;
+  TEST_ASSERT_FALSE(dl::netSlotTiming(long255).fitsWithGrace);
+  // the legacy guard check (3.5 ms) refuses the 255 B frame and accepts the 220 B frame (15.41 + 3.5 <= 20)
+  TEST_ASSERT_FALSE(fm::slotFits(long255.lora, long255.onAirBytes, long255.slotIntervalNs, 3500000));
+  TEST_ASSERT_TRUE(fm::slotFits(v2.lora, v2.onAirBytes, v2.slotIntervalNs, 3500000));
 
   // SF7 (30.7 ms) and a 10 ms slot must be refused by the same check
   dl::AirProfile sf7 = v2;
@@ -263,8 +295,9 @@ void test_active_profile_selection_and_frame_limits() {
 #endif
   TEST_ASSERT_TRUE(dl::netSlotTiming(dl::kNetworkProfileActive).fitsWithGrace);
   TEST_ASSERT_TRUE(dl::kNetworkProfileActive.fixedFrameLength <= NetAirAccess::kMaxAir);
-  // 255 B on air = 253 B air packet + 2 B trailer, in every profile
-  TEST_ASSERT_EQUAL_UINT32(253, dl::kNetworkProfileV2Trial.fixedFrameLength - 2);
+  // on-air frame = air packet + 2 B trailer: v1 255 B -> 253 B, v2-trial 220 B -> 218 B
+  TEST_ASSERT_EQUAL_UINT32(253, dl::kNetworkProfileV1.fixedFrameLength - 2);
+  TEST_ASSERT_EQUAL_UINT32(218, dl::kNetworkProfileV2Trial.fixedFrameLength - 2);
 }
 
 void test_expected_rates() {
@@ -1499,13 +1532,93 @@ void test_lua_command_confirmation_flow() {
   TEST_ASSERT_FALSE(m.handleWrite(6, 77, 0xEF, st, t, act, f));
 }
 
+// A LOG_TEXT must fit one air packet of the active profile: 220 B on air -> 218 B payload -> 210 B net frame -> 203 text
+// bytes. A full 233-byte log text (240 B net frame) can never be sent at 220 B and is silently never delivered.
+void test_log_text_capacity_in_220b_air_packet() {
+  using namespace VCTR::ExVectrLink;
+  const size_t payload = dl::kNetworkProfileV2Trial.onAirBytes - 2; // minus the 2-byte FHSS trailer
+  uint8_t buf[255], frame[240] = {};
+  net::wire::AirPacketWriter w;
+  net::wire::AirHeader h;
+  TEST_ASSERT_TRUE(w.begin(buf, payload, h));
+  const size_t maxFrame = w.space() - 1;
+  TEST_ASSERT_EQUAL_UINT32(210, maxFrame);
+  const size_t overhead = 4 + 2 + 1; // net header, data header, severity
+  TEST_ASSERT_EQUAL_UINT32(203, maxFrame - overhead);
+  TEST_ASSERT_TRUE(netmode::AirDiagReporter::kMaxLine <= maxFrame - overhead);
+  TEST_ASSERT_TRUE(w.add(frame, maxFrame));
+  TEST_ASSERT_TRUE(w.begin(buf, payload, h));
+  TEST_ASSERT_FALSE(w.add(frame, 240)); // a 233-char log line
+  TEST_ASSERT_TRUE(w.begin(buf, 253, h));
+  TEST_ASSERT_TRUE(w.add(frame, 240)); // fits the 255 B profile
+}
+
+// AIRDIAG line: key=value pairs, fits one LogText with realistic counter values, window maxima in us.
+void test_airdiag_line_format() {
+  using namespace VCTR::ExVectrLink::netmode;
+  AirDiagInput in;
+  in.state = 2;
+  in.d.txSlots = 123456; in.d.txStarted = 123400; in.d.txSkipNotSynced = 40; in.d.txSkipSetup = 1;
+  in.d.txLateStart = 7; in.d.txMissed = 3; in.d.rxSlots = 123000; in.d.rxValid = 49000; in.d.rxNone = 74000;
+  in.d.rxRadioPkts = 49100; in.d.rxTrailerBad = 5; in.d.rxCounterMismatch = 2; in.d.wakeups = 246000;
+  in.d.wakeLate1ms = 99; in.d.missEvents = 4;
+  in.d.prepSumNs = 123400LL * 180000LL; in.d.prepMaxNs = 412000; in.d.wakeLateMaxNs = 1530000;
+  in.d.startLateMaxNs = 25000;
+  in.d.airCount = 123000; in.d.airSumNs = 123000LL * 16600000LL; in.d.airMinNs = 16400000; in.d.airMaxNs = 17900000;
+  in.d.airLate = 9;
+  in.txDone = 123390; in.missedSlots = 6; in.graceRescue = 11; in.graceExpire = 12; in.counterResync = 1;
+  AirDiagReporter rep;
+  char line[240];
+  const size_t n = rep.poll(5000000000LL, in, line, sizeof line);
+  TEST_ASSERT_EQUAL_UINT32(strlen(line), n);
+  // One LOG_TEXT in a 220 B air frame carries at most 203 text bytes (see AirDiag.hpp); stay well below.
+  TEST_ASSERT_TRUE(n > 0 && n <= 200);
+  TEST_ASSERT_EQUAL_INT(0, strncmp(line, "AIRDIAG s=2 tx=123456 st=123400 dn=123390 ", 42));
+  TEST_ASSERT_NOT_NULL(strstr(line, " ns=40 nu=1 tl=7 "));
+  TEST_ASSERT_NOT_NULL(strstr(line, " rx=123000 ok=49000 no=74000 "));
+  TEST_ASSERT_NOT_NULL(strstr(line, " wk=246000 w1=99 ms=6/4 gr=11 ge=12 "));
+  TEST_ASSERT_NOT_NULL(strstr(line, " pr=180/412 ar=16400/16600/17900 al=9 wl=1530 sl=25"));
+  // 1 Hz: nothing before the period has passed, the next line after it.
+  TEST_ASSERT_EQUAL_UINT32(0, rep.poll(5500000000LL, in, line, sizeof line));
+  // Window mean covers only the time since the previous line: 100 more TX with 300 us prep -> avg 300.
+  in.d.txStarted += 100;
+  in.d.prepSumNs += 100LL * 300000LL;
+  TEST_ASSERT_TRUE(rep.poll(6000000000LL, in, line, sizeof line) > 0);
+  TEST_ASSERT_NOT_NULL(strstr(line, " pr=300/412 "));
+  // air= mean also covers only the window: 10 more frames at 17.0 ms observed -> avg 17000.
+  in.d.airCount += 10;
+  in.d.airSumNs += 10LL * 17000000LL;
+  TEST_ASSERT_TRUE(rep.poll(7000000000LL, in, line, sizeof line) > 0);
+  TEST_ASSERT_NOT_NULL(strstr(line, " ar=16400/17000/17900 al=9"));
+  // Large counters (9 digits, about 40 days at 25 slots/s per counter) still fit comfortably.
+  in.d.txSlots = in.d.txStarted = in.d.rxSlots = in.d.rxValid = in.d.rxNone = in.d.wakeups = 999999999u;
+  in.txDone = 999999999u;
+  TEST_ASSERT_TRUE(rep.poll(8000000000LL, in, line, sizeof line) > 0);
+  char msg[60];
+  snprintf(msg, sizeof msg, "AIRDIAG length with 9-digit counters: %u", (unsigned)strlen(line));
+  TEST_MESSAGE(msg);
+  TEST_ASSERT_TRUE(strlen(line) <= 200);
+  // Worst case (every counter 10 digits) is cut at the buffer, never overruns.
+  in.d.txSlots = in.d.txStarted = in.d.rxSlots = in.d.wakeups = 4000000000u;
+  char small[64];
+  const size_t m = rep.format(small, sizeof small, in);
+  TEST_ASSERT_EQUAL_UINT32(63, m);
+  // Even with a big buffer the line never exceeds kMaxLine, which fits one LOG_TEXT in a 220 B air frame.
+  char big[300];
+  TEST_ASSERT_TRUE(rep.format(big, sizeof big, in) <= AirDiagReporter::kMaxLine);
+  TEST_ASSERT_TRUE(AirDiagReporter::kMaxLine <= 203);
+}
+
 void setUp() {}
 void tearDown() {}
 
 int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_time_on_air_profile_v1);
+  RUN_TEST(test_log_text_capacity_in_220b_air_packet);
+  RUN_TEST(test_airdiag_line_format);
   RUN_TEST(test_slot_budget);
+  RUN_TEST(test_wakeup_lead_build_flag);
   RUN_TEST(test_v2_trial_profile_timing);
   RUN_TEST(test_active_profile_selection_and_frame_limits);
   RUN_TEST(test_expected_rates);

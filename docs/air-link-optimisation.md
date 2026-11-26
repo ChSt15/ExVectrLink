@@ -312,10 +312,32 @@ Order matters; every step keeps FPV unchanged (`pio test -e native_fhss`, golden
 6. Ship-node RX diversity (ESP32 diversity board, existing env): consider as a hardware option?
 7. Payload reductions (network-budget P2, P3/P4, P8; `AIR_ACTUATORS` rate) if more than about 4 dB is needed.
 
-## 8. Trial: SF6 / BW1600 / CR 4/5 with 255 B frames ("v2-trial", implemented 2026-11-26)
+## 8. Trial: SF6 / BW1600 / CR 4/5 ("v2-trial", implemented 2026-11-26, revised to 220 B frames)
 
-Owner decision: try SF6 / BW1600 / CR 4/5 with the full 255 B frame on the Starship link, although it is above the
-16.5 ms budget of section 1. This is an experiment, selected at **build time only** (no runtime switch). v1 stays the
+**Revision (owner decision 2026-11-26): the frame is 220 B on air (218 B air packet + 2 B trailer), not 255 B.** At
+220 B the airtime is **15.409 ms** (repo formula, **estimated, not measured on air**). That meets the strict 16.5 ms
+budget (`fitsStrict` true), so the grace path and the short RX lead below are no longer needed for the shipped
+profile. **Bench result (PA hardware, 2026-11-26): the 1.0 ms RX lead was harmful at 220 B** (downlink 43-54 %, TX module
+`graceExpireCount` at 41-45 % of slots, against 97.5 % for plain v1): the TX module (ESP32-S3, wakeups up to 0.3 ms late,
+some over 1 ms) had too little time to hop and arm RX before the ship's SF6 preamble (about 470 us). v2-trial now has
+`wakeupLeadRxNs = 0`, i.e. the single 2.5 ms lead for TX and RX slots. The mechanism and the 255 B path stay in the code and are covered by tests with a local 255 B fixture. Margins at 220 B (all from
+`netSlotTiming()`, asserted in `test_v2_trial_profile_timing`):
+
+| Quantity | 220 B (shipped) | 255 B (earlier, sections 8.1/8.2) |
+|---|---|---|
+| time on air | 15.409 ms | 17.772 ms |
+| strict margin (16.5 ms budget) | +1.09 ms | -1.27 ms |
+| frame end vs TX wakeup (17.5 ms) | +2.09 ms | -0.27 ms |
+| frame end vs grace cutoff (19.5 ms) | 4.09 ms | 1.73 ms |
+| left after frame end for RX fetch + TX prep + busy-wait | 4.59 ms | 2.23 ms |
+| own TX done before the RX-slot wakeup, shipped single 2.5 ms lead (`ownTxDoneSlackNs`) | **2.09 ms** (safe) | -0.27 ms (cut) |
+| own TX done before the RX-slot wakeup with a 1.0 ms RX lead (removed from v2-trial) | 3.59 ms | 1.23 ms |
+
+The payload budget shrinks by 35 B per frame compared with v1 (218 B vs 253 B air packet). The tables and findings in
+8.1 and 8.2 below describe the original 255 B variant and remain valid for it.
+
+Original text: owner decision to try SF6 / BW1600 / CR 4/5 with the full 255 B frame on the Starship link, although it
+is above the 16.5 ms budget of section 1. This is an experiment, selected at **build time only** (no runtime switch). v1 stays the
 default; FPV is untouched (the FPV golden-trace test passes unchanged).
 
 ### 8.1 Exact timing (repo formula `fhss::loraSymbolCount` / `loraTimeOnAirUs`, 255 B, preamble 12, implicit header, CRC on)
@@ -358,7 +380,7 @@ Two defects showed up in the FHSS simulation (`native_fhss`), both only when the
 Fixes (FHSS lib, active only for profiles where `wakeupSlackNs < 0`, i.e. v2-trial; v1 and FPV paths are
 bit-identical, the FPV golden trace and all v1 network tests pass unchanged):
 
-- `AirProfile::wakeupLeadRxNs` (new field, default 0 = same as `wakeupLeadNs`). v2-trial sets 1.0 ms: the wakeup
+- `AirProfile::wakeupLeadRxNs` (new field, default 0 = same as `wakeupLeadNs`). The 255 B variant set 1.0 ms (no longer set by v2-trial, see section 8 intro): the wakeup
   before an RX slot happens 1.0 ms before the boundary (19.0 ms), 1.23 ms after the own TX has ended. The wakeup
   before a TX slot keeps the 2.5 ms lead (TX prep).
 - `FHSS::rxInFlightAtWakeup` (set by `applyProfile` from `netSlotTiming`): the TX side gets the grace window in
@@ -366,7 +388,7 @@ bit-identical, the FPV golden trace and all v1 network tests pass unchanged):
 - `netSlotTiming(profile)` (AirProfile.hpp) derives all of the above from the profile; `fitsWithGrace` requires
   both the grace budget (>= 1 ms before the cutoff minus 0.5 ms) and the own-TX-done slack (>= 1 ms). The firmware
   (`NetRadio.cpp`) falls back to v1 if the active profile does not satisfy it. `NetAirAccess::kMaxAir` and the
-  frame length come from the profile (both 255, static_assert).
+  frame length come from the profile (both from the profile, static_assert).
 
 ### 8.3 Build instructions
 
@@ -384,12 +406,15 @@ diversity ship node can get a `_v2trial` env the same way (`extends` plus the fl
 
 ### 8.4 Tests
 
-- `native` `test_air_link`: `test_v2_trial_profile_timing` (differs from v1 only by SF and RX lead; ToA 17.772 ms;
-  strict budget refused, margins above; usual-lead variant, SF7 and a 10 ms slot refused),
+- `native` `test_air_link`: `test_v2_trial_profile_timing` (differs from v1 by SF and frame length only; ToA 15.409 ms;
+  strict budget met, margins above, `ownTxDoneSlackNs` 2.09 ms with the single lead; a local 255 B variant (17.772 ms, RX lead set to 1.0 ms in the test) still refused by the strict budget, accepted
+  with grace, refused with the usual lead; SF7 and a 10 ms slot refused),
   `test_active_profile_selection_and_frame_limits` (v1 is the default).
-- `native_fhss` `test_fhss`: `test_net_v2_trial_locks_and_holds_with_17_8ms_frames` (20 s, crystal mismatch, 500/500
-  frames each way, no own frame cut), `test_net_v2_trial_with_single_lead_cuts_own_frames` (negative control: the
-  fake radio now models "TX aborted by RX arm or hop"). `test_fpv_trace_is_unchanged` unchanged.
+- `native_fhss` `test_fhss`: `test_net_v2_trial_locks_and_holds_with_220b_frames` (20 s, crystal mismatch, 500/500
+  frames each way, no own frame cut), `test_net_v2_trial_with_single_lead_still_clean_at_220b`, and with a local 255 B
+  fixture `test_net_long_255b_frames_with_short_rx_lead_hold_sync` and
+  `test_net_long_255b_frames_with_single_lead_cut_own_frames` (negative control: the fake radio models "TX aborted
+  by RX arm or hop"). `test_fpv_trace_is_unchanged` unchanged.
 
 ### 8.5 Bench test for the owner (hardware, not done)
 
@@ -400,3 +425,195 @@ diversity ship node can get a `_v2trial` env the same way (`extends` plus the fl
 2. Compare mean and 10th-percentile LQ and SNR at the same RSSI against v1 at the two field positions (5.2).
 3. Confirm the ESP8285 SPI time for a 255 B FIFO read plus write is well below 2 ms (the simulation uses no
    hardware latency for it).
+
+## 9. AIRDIAG: slot-path counters (diagnosing the asymmetric downlink, 2026-11-26)
+
+Bench finding: the downlink (ship to TX module) loses about 60 % of its frames at a strong signal with no CRC errors
+(TX module rx_lq 40 %, RSSI -62 dBm, air_rx_bad 0), the uplink delivers 96 %. The TX module never sees the frames, so
+either the ship node does not transmit in many of its slots, or it transmits late or on the wrong channel. AIRDIAG
+counts what the ship's FHSS task really does. It exists on both network firmwares (shared FHSS code), v1 and v2-trial.
+
+### 9.1 Where and how
+
+- Counters: `SlotDiag` (`lib/ExVectrLink/include/ExVectrLink/datalink/SlotDiag.hpp`), a member of `FHSS`
+  (`getSlotDiag()`, `resetSlotDiagWindow()`). Slot path: plain integer increments, no logging, no float, no heap, no
+  extra SPI, no queueing. One extra `Core::NowNs()` per wakeup; the TX prep stamp reuses the first clock read of the
+  existing busy-wait (the loop makes exactly as many reads as before). FPV behaviour is unchanged
+  (`test_fpv_trace_is_unchanged` passes with the golden hash).
+- Output: `src_network/AirDiag.hpp` formats ONE `LOG_TEXT` (severity Info) at 1 Hz from the main loop (not the slot
+  task), like `RCDIAG`. TX module: goes to the USB host. Ship node: goes over the air to the ground station, so it
+  uses a downlink packet once per second and can itself be lost: counters are cumulative, a lost line costs nothing.
+  No packet schema change. Dropped while no USB host is attached (TX module).
+- TX-done count: the glue (`netAirDiagInput()` in `NetRadio.cpp`) adds `getTxPacketCount()` of radio A (and B with
+  diversity) so it can be compared with `st`.
+
+### 9.2 Line format
+
+```
+AIRDIAG s=2 tx=.. st=.. dn=.. ns=.. nu=.. tl=.. rx=.. ok=.. no=.. wk=.. w1=.. ms=<slots>/<events> gr=.. ge=..
+        pr=<avg>/<max> ar=<min>/<avg>/<max> al=.. wl=<max> sl=<max>
+```
+
+Shortened 2026-11-26 (short keys; `tmiss`, `rrx`, `tbad`, `cmm`, `crs` dropped from the line, the counters still exist in
+`SlotDiag`). **Length:** the line is at most `AirDiagReporter::kMaxLine` = 200 characters (a longer one is cut), about 160
+with realistic counters and 188 with nine-digit counters (test `test_airdiag_line_format`). Reason: one LOG_TEXT must
+fit one air packet. At 220 B on air the air packet is 218 B, minus 3 B header (AHDR, SFC, NETID), 4 B CRC-32 and the 1 B
+entry LEN = 210 B largest net frame, minus 4 B net header, 2 B data header and 1 B severity = **203 text bytes**
+(test `test_log_text_capacity_in_220b_air_packet`). The earlier line (exactly 233 characters, the LogText limit)
+produced a 240 B net frame that can never fit a 220 B air packet: `FrameAggregator::pack()` skips a frame that does not
+fit and the frame expires in the queue, no error anywhere. That explains the missing node 3 AIRDIAG lines on the
+v2-trial bench run (at 255 B the packet holds 245 B and the line fitted). `Node::send()` itself accepts the payload
+(limit 234 B), and the Event class has no rate limit that applies.
+
+Everything is cumulative since boot (grep and difference two lines) except `pr`, `ar`, `wl` and `sl`, which
+cover the time since the previous line and are in microseconds (`al` is cumulative).
+
+| Key | Meaning |
+|---|---|
+| `s` | FHSS state 0 Searching, 1 Syncing, 2 Synced |
+| `tx` | own TX slots scheduled (role "this end transmits") |
+| `st` | `startTx()` issued (frame accepted by `setupTxPacket`) |
+| `dn` | TX-done count of the radio driver(s), summed over both diversity radios |
+| `ns` | own TX slots skipped because the RX side was not Synced |
+| `nu` | `setupTxPacket()` refused the frame (empty, wrong length, no radio) |
+| `tl` | TX prep finished after the slot boundary (TX left late, not skipped) |
+| `rx` / `ok` / `no` | completed receive slots / with a valid packet / without one (`rx = ok + no`) |
+| `wk` / `w1` | wakeups / wakeups later than 1 ms after the time `timingControl()` asked for |
+| `ms=a/b` | `missedSlotCounter` (slots fast-forwarded) / number of fast-forward events |
+| `gr` / `ge` | `graceRescueCount` / `graceExpireCount` |
+| `pr=a/m` | mean / max us from wakeup to "TX prep finished" (before the boundary busy-wait; the lead is 2500 us) |
+| `ar=n/a/x` | min / mean / max us from `startTx` to the first observation of the frame's TX done (section 10.2; slot resolution, an upper bound) |
+| `al` | own frames whose TX done was not seen at the next wakeup (seen later, or never because the radio was re-armed over it); cumulative |
+| `wl` | max wakeup lateness in us |
+| `sl` | max (actual `startTx` time minus slot boundary) in us; above 0 the frame left late |
+
+Not available: "radio busy" as a skip reason. `Sx1280_Direct::startTx()` returns without transmitting when
+`txPacketLoaded` is false (the FIFO load in `push()` did not happen), and FHSS cannot see that (void return). It shows
+up as `st` growing faster than `dn` (allow a difference of 1 for the frame in flight).
+
+### 9.3 How to read it (ship node line, downlink loss)
+
+Compare the ship's `st`/`dn` rate (expected 25/s) with the TX module's `ok`/`rx`:
+
+| Observation | Hypothesis |
+|---|---|
+| `tx` about 25/s, `st` lower | ship skips: `ns` high = it is not Synced (state not 2) in those slots; `nu` high = frame refused (length or empty) |
+| `ms` rising, `w1` rising, `wl` large | scheduling: the task woke too late and fast-forwarded past own TX slots (loop blocked: UART, WiFi, `router.log`, SPI) |
+| `st` about 25/s but `dn` lower | `startTx()` silently did nothing (frame not loaded into the FIFO), or TX never completed |
+| `st` = `dn` = 25/s, `tl` / `sl` / `pr` high | frames leave late: `sl` above a few tens of us, or `pr` max close to the 2500 us lead, moves the frame relative to the slot grid. The receiver's RX window is then missed, no CRC error on the other side |
+| everything clean on the ship, `ok` still 40 % on the TX module | not the ship's slot path: look at the TX module (its `rx`, `gr`/`ge`), the channel (a hop sequence mismatch shows as `no` while the ship transmits), or the radios (diversity, antenna) |
+| TX module `rx` far above `ok` | frames never arrive intact: timing or channel (same as above) |
+| `ge` rising with `gr` | the in-flight grace window expires: RX fetch plus TX prep do not fit |
+
+### 9.4 Cost of the counters in the slot path (estimate, not measured on hardware)
+
+- Wakeup: one `Core::NowNs()` read, two 64-bit subtractions and compares, three increments or maximum updates:
+  about 60 to 100 cycles including the clock read (a `micros()` plus scaling on the ESP8285). About 1 us at 80 MHz,
+  0.5 us at 160 MHz. It runs before the radio poll, in the part of the wakeup lead that has slack (1 ms).
+- TX prep: 64-bit subtract, add and compare done before the boundary busy-wait (inside the lead, not on the critical
+  edge), plus a few increments. No extra clock read.
+- Critical edge (busy-wait exit to `startTx()` trigger): unchanged. After the trigger: one increment and one 64-bit
+  subtract and compare, about 20 cycles, executed while the radio is already transmitting.
+- RX handling and `timingControl()`: 2 to 6 plain 32-bit increments per slot, a few cycles each.
+- Total per slot: roughly 100 to 150 cycles on the 32-bit Xtensa cores, of which none is on the TX critical edge.
+- Memory: `SlotDiag` about 96 bytes of RAM per FHSS instance, plus 16 bytes of timestamps. The reporter runs in the main
+  loop (1 `snprintf` per second, stack buffer 240 bytes).
+
+### 9.5 Tests
+
+- `native_fhss` `test_fhss`: `test_diag_counters_v1` and `_v2_trial` (counters equal the fake radios' real
+  transmissions and deliveries over 10 s: `st` = frames on air, `tx` = started + skipped + missed, `rxs = ok + none`,
+  `ok` = frames delivered), `test_diag_late_wakeup_and_rf_block` (a 12 ms stall is seen in `wake` and `wl1`; a 1 s RF
+  block raises `none`, not `ok`, and TX continues), `test_diag_shows_silent_startTx` (a fake radio whose `startTx()`
+  does nothing: `st` rises, the radio's transmissions do not). `test_fpv_trace_is_unchanged` still passes with the
+  original golden hash. The harness runs both ends on one thread, so a clean run shows up to about 2.5 ms of
+  `wake` lateness from the other end's busy-wait; that is a harness artefact, not a limit.
+- `native` `test_air_link`: `test_airdiag_line_format` (field order, prefix, window mean, 1 Hz gating, truncation,
+  length below the 233-byte LogText limit).
+
+### 9.6 Bench procedure (owner, hardware, not done)
+
+1. Flash the instrumented firmware on both ends (v2-trial or v1, either shows it). Use the ground-station log view or
+   `grep AIRDIAG` on the recording. The TX module line is on USB; the ship's line comes over the (lossy) downlink.
+2. Let it run 60 s at the position that showed 40 %. Take two lines 10 s apart and difference the cumulative fields.
+3. Apply the table in 9.3. Report both lines (ship and TX module) for the same instant.
+
+## 10. Experiment: wakeup lead 3.5 ms (2026-11-26)
+
+Bench finding (AIRDIAG, v1, 255 B SF5): downlink LQ 58 % mean, uplink 99.8 %. The TX module starts its TX late in about
+60 % of its slots (`tl`, `sl` max 431-486 us; prep avg 2.2 ms, max 2.77 ms against the 2.5 ms lead), the ship in 20 %.
+Hypothesis: the TX module's frame start jitters by up to 0.5 ms because prep overruns the lead; the ship follows that
+timing, so its frames fall outside the TX module's short RX preamble window (12 symbols = about 240 us at SF5/BW1600).
+
+**Flag.** `-DEXVECTRLINK_NET_WAKEUP_LEAD_NS=<ns>` sets `kNetworkWakeupLeadNs` (AirProfile.hpp), used by
+`kNetworkProfileV1` and `kNetworkProfileV2Trial` (v2-trial: single lead, `wakeupLeadRxNs = 0`). Absent: 2.5 ms as before.
+`kFpvProfile` does not use it, so FPV is bit-identical (golden `test_fpv_trace_is_unchanged` unchanged).
+
+**Envs.** `exvectrlink_tx_module_network_lead35` and `exvectrlink_rx_network_esp8285_lead35` (plain v1 plus the flag at
+3500000). Flash both ends with the same lead (not strictly required for compatibility, but the experiment needs both).
+
+**Timing check (v1, 3.5 ms lead).** Frame ends at 10.56 ms; the wakeup before the next slot is at 16.5 ms: slack 5.94 ms
+(2.5 ms lead: 6.94 ms), strict margin 4.94 ms, own-TX-done slack 5.94 ms. Nothing assumes 2.5 ms: `kGraceTxCutoffNs`
+(0.5 ms before the boundary) is independent of the lead, and the grace path is not even reached because the frame is over
+at the wakeup. `wakeupLeadRxNs = 0` in v1, so the wakeup before an RX slot also moves to 3.5 ms: it only hops the
+channel and arms RX, 3.5 ms early, with the own TX long finished (5.94 ms before), which is harmless (the radio listens
+about 1 ms longer before the boundary, with no frame possible then). If one wants to isolate the TX side, set the RX
+lead to 2.5 ms separately (`wakeupLeadRxNs`); not done, to keep v1 a single-lead profile. Cost: TX prep starts 1 ms
+earlier; the busy-wait up to the boundary grows by the same, so the CPU is occupied 1 ms longer per TX slot (matters on
+the ESP8285 only for its other tasks, UART, which tolerate it). The slot path has no extra code.
+
+**What AIRDIAG should show if the hypothesis holds.** `tl` and `sl` near 0 on both ends (prep max about 2.8 ms < 3.5 ms
+lead), the TX module's `rx_lq` rising from about 58 % towards the uplink value. If `tl` drops but the downlink stays
+at 58 %, the cause is elsewhere (e.g. the ship's slot phase relative to the TX module's RX window, or receiver
+sensitivity); report both lines.
+
+**Tests.** `native` `test_air_link`: `test_wakeup_lead_build_flag` (default 2.5 ms, profiles follow the constant, FPV
+and v2-trial single lead (`wakeupLeadRxNs` 0), 3.5 ms timing). `native_fhss`: `test_net_v1_with_3p5ms_wakeup_lead_holds_sync`
+(simulated: locks, holds, no truncation, 490+ of 500 packets each way).
+
+## 10. Time-on-air check and `air=` (2026-11-26)
+
+### 10.1 Formula check
+
+`fhss::loraSymbolCount()` (FhssMath.hpp) for SF5/SF6, CR 4/5, implicit header, CRC on, 12 preamble symbols:
+`symbols = 12 + 6.25 + 8 + ceil((8*PL + 16 - 4*SF) / (4*SF)) * 5`, symbol time `2^SF / BW` with BW 1.625 MHz.
+It matches RadioLib's SX128x/SX126x `getTimeOnAir` (SF5/SF6: 6.25 preamble overhead, no `+8` term in the payload
+numerator) and the driver's `calcLoRaSymbolCount()`. Hand calculation:
+
+| Profile | Payload symbols | Total symbols | Symbol time | Time on air | Repo |
+|---|---|---|---|---|---|
+| v1: SF5, 255 B | ceil(2036/20) = 102, x5 = 510 | 536.25 | 19.692 us | 10.560 ms | 10.560 ms |
+| v2-trial: SF6, 220 B | ceil(1752/24) = 73 (exact), x5 = 365 | 391.25 | 39.385 us | 15.409 ms | 15.409 ms |
+
+No discrepancy. Two caveats: the SF6 payload term divides exactly (1752 / 24 = 73.0), so if the silicon rounded this
+differently the frame would be 5 symbols (197 us) longer, still far too small to explain a frame still on air 16.5 ms
+after the boundary. Not verified: the SX1280 datasheet (not available offline here; the source for the check was the
+formula in the driver and the RadioLib behaviour from memory) and the real chip (needs a spectrum or logic-analyser
+measurement of the TX-done / BUSY / PA pin, not possible from here).
+
+### 10.2 What `air=` measures
+
+`startTx()` stamps the clock it already read for the boundary busy-wait (`t`, the last read before the call; the SPI
+`setTx` command itself, tens of us, is not included) and the radio driver's TX-done count. TX done is read in
+`Sx1280_Direct::pull()` only, and pull() runs once per slot at the wakeup (the first call of `taskThread()`), so the
+frame's done is first observed at the NEXT slot's wakeup. `air` is that wakeup time minus the `startTx` stamp
+(`wakeNs_`, no extra clock read). Consequences:
+
+- Resolution is one slot: the value is the wakeup spacing (about slot interval minus lead, e.g. 16.5 ms), NOT the
+  airtime. It cannot show 15.4 vs 16.0 ms. In the healthy case min/avg/max are all about the same.
+- It does prove the bound: `air` min about 16.5 ms means TX done was already set at the wakeup, so the real airtime is
+  below that. `alt` counts the frames for which it was not: TX done came only at a later wakeup (observed later than one
+  slot interval) or never, because the slot code re-armed the radio over a still running TX (counted when the next TX
+  starts). `alt` above 0 on the ship means its own frame is still on air at its next wakeup.
+- Applies to both nodes (same FHSS code; diversity sums the two radios' counts, only the transmitting one changes).
+
+Slot-path cost: at `startTx` one indirect call to a getter pair (two member reads, no SPI) and three stores, plus the
+`airLate` check; at the wakeup one indirect getter call (a compare) and about ten integer ops once per TX frame. No
+logging, no float, no extra SPI. FPV builds never set the count source (`setTxDoneCountSource`), so FPV only gets one
+null-pointer test per TX slot and per wakeup.
+
+A true airtime measurement needs a finer TX-done time and cannot be had cheaply: it would need an extra SPI IRQ read
+inside the slot (forbidden), or TX_DONE routed to DIO1 with an ISR timestamp (ExVectrNetwork `Sx1280_Direct`
+deliberately keeps TX_DONE off DIO1 to protect the RX_DONE edge latch), or a second timed wakeup per TX slot just after
+the expected end (a bench-only experiment: one more pull() at `startTx + toa + 0.3 ms`, SPI while the slot is idle).
+Propose the last one only if `alt` and the other counters do not explain the v2-trial downlink.

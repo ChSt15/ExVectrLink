@@ -4,6 +4,10 @@
 
 Last verified against commit: ce2b498 + `feature/gs-requests-and-upload` (env table and sizes; submodules ExVectrNetwork de708ca, ExVectrPackets 4ca8fb1 local)
 
+## Which env for the Starship ship node
+
+The ship node board (ESP8285 + SX1280) has an **external PA and LNA with RX/TX enable pins**. Use `exvectrlink_rx_network_esp8285_pa` (`-DTARGET_GENERICESP8285WITHPA`), never the plain `exvectrlink_rx_network_esp8285`. The plain env does not drive the PA/LNA switching, which shows up as an asymmetric link: uplink (GS to ship) 95 to 100 % LQ, downlink (ship to GS) 30 to 58 % with a strong RSSI and no CRC errors (bench, 2026-11-26: pristine `Development` with the `_pa` env gave 97.5 % / 99.6 %). Every experiment env for the ship needs a `_pa` variant (for example `exvectrlink_rx_network_esp8285_pa_v2trial`). The TX module (Pocket) has no such pin issue.
+
 ## How a build is configured
 
 - **`TARGET_*`** picks the pin map. `src/Hardware.hpp:4-26` includes exactly one `src/targets/*.hpp`, which defines `namespace VCTR::HardwareConfig`. A build without a `TARGET_*` has no pin map and does not compile.

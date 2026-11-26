@@ -89,6 +89,15 @@ void configureRadio(sx::Sx1280_Direct &radio, int maxPower, int paDbm, int8_t po
   radio.setTxPower(clampNetPower(power, maxPower));
 }
 
+// Cumulative TX-done count of the radio driver(s): plain getters, no SPI (FHSS SlotDiag air=).
+uint32_t txDoneCountNow() {
+  uint32_t n = datalink::getDatalinkRadioA().getTxPacketCount();
+#if defined(HAS_DIVERSITY)
+  n += datalink::getDatalinkRadioB().getTxPacketCount();
+#endif
+  return n;
+}
+
 } // namespace
 
 datalink::FHSS &netFhss() { return datalink::getFhss(); }
@@ -113,6 +122,7 @@ void netRadioSetup(bool isRxSide, NetAirAccess &access, int8_t txPowerDbm) {
   fhss.setIsRxSide(isRxSide);
   fhss.applyProfile(activeProfile());
   fhss.setTxPayloadProvider(&access);
+  fhss.setTxDoneCountSource(txDoneCountNow);
 
   radio::initRadioDrivers();
 
@@ -155,6 +165,22 @@ void netRadioSetTxPower(int8_t dbm) {
 #if defined(HAS_DIVERSITY)
   datalink::getDatalinkRadioB().setTxPower(dbm);
 #endif
+}
+
+AirDiagInput netAirDiagInput() {
+  auto &fhss = datalink::getFhss();
+  AirDiagInput in;
+  in.d = fhss.getSlotDiag();
+  in.state = static_cast<uint8_t>(fhss.getFhssState());
+  in.txDone = datalink::getDatalinkRadioA().getTxPacketCount();
+#if defined(HAS_DIVERSITY)
+  in.txDone += datalink::getDatalinkRadioB().getTxPacketCount();
+#endif
+  in.missedSlots = fhss.getMissedSlotCounter();
+  in.graceRescue = fhss.getGraceRescueCount();
+  in.graceExpire = fhss.getGraceExpireCount();
+  in.counterResync = fhss.getCounterResyncCount();
+  return in;
 }
 
 bool netRadioLeftSearching() {

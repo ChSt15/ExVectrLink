@@ -110,7 +110,9 @@ public:
     for (size_t i = 0; i < p.payload.size(); i++) txBytes_.push_back(p.payload[i]);
     return true;
   }
+  bool silentStartTx = false; ///< test hook: startTx() does nothing, like Sx1280_Direct::startTx() without a loaded packet
   void startTx() override {
+    if (silentStartTx) return;
     abortRx();
     mode_ = Mode::Tx;
     Transmission t{id_, channel_, g_now, g_now + toa_, txBytes_};
@@ -449,19 +451,18 @@ void test_net_recovers_after_5s_rf_block() {
   TEST_ASSERT_TRUE(n.firstSyncedNs - blockEnd < 6000000000LL);
 }
 
-void test_net_v2_trial_locks_and_holds_with_17_8ms_frames() {
-  const auto timing = netSlotTiming(kNetworkProfileV2Trial);
-  const int64_t toaNs = timing.toaNs; // 17.77 ms, from the repo formula
-  NetPair n(200, false, kNetworkProfileV2Trial, toaNs);
+static void v2TrialHoldsSync(const AirProfile &prof, uint32_t expectMaxLen, const char *label) {
+  const auto timing = netSlotTiming(prof);
+  NetPair n(200, false, prof, timing.toaNs); // airtime from the repo formula
   n.runFor(10000000000LL);
   TEST_ASSERT_EQUAL_INT((int)FHSSState::Synced, (int)n.rx->getFhssState());
-  TEST_ASSERT_EQUAL_UINT32(253, n.pTx.lastMaxLen);
+  TEST_ASSERT_EQUAL_UINT32(expectMaxLen, n.pTx.lastMaxLen);
   const uint32_t desync0 = n.rx->getDesyncCounter(), g1 = n.rxGot[1], g0 = n.rxGot[0];
   n.runFor(20000000000LL); // 20 s
   TEST_ASSERT_EQUAL_INT((int)FHSSState::Synced, (int)n.rx->getFhssState());
   TEST_ASSERT_EQUAL_UINT32(desync0, n.rx->getDesyncCounter());
   char msg[120];
-  snprintf(msg, sizeof msg, "v2-trial 20 s: uplink %u, downlink %u of 500 each", (unsigned)(n.rxGot[1] - g1),
+  snprintf(msg, sizeof msg, "%s 20 s: uplink %u, downlink %u of 500 each", label, (unsigned)(n.rxGot[1] - g1),
            (unsigned)(n.rxGot[0] - g0));
   TEST_MESSAGE(msg);
   TEST_ASSERT_TRUE(n.rxGot[1] - g1 >= 490);
@@ -471,14 +472,53 @@ void test_net_v2_trial_locks_and_holds_with_17_8ms_frames() {
   TEST_ASSERT_EQUAL_UINT32(0, n.rRx->txTruncated);
 }
 
-void test_net_v2_trial_with_single_lead_cuts_own_frames() {
-  // Negative control: the same 17.77 ms frames with the usual 2.5 ms lead before RX slots. The wakeup at 17.5 ms hops
-  // and arms RX while the own frame is still on air; the simulation now models that as a lost frame.
-  static AirProfile oneLead = kNetworkProfileV2Trial;
+// 220 B frames, 15.41 ms on air: the shipped v2-trial profile.
+void test_net_v2_trial_locks_and_holds_with_220b_frames() {
+  v2TrialHoldsSync(kNetworkProfileV2Trial, 218, "v2-trial 220 B");
+}
+
+// The earlier 255 B variant (17.77 ms on air) is still supported by the code: it relies on the TX grace and the short
+// RX-slot lead. Kept as a local fixture so those paths stay covered.
+static AirProfile long255Profile() {
+  AirProfile p = kNetworkProfileV2Trial;
+  p.fixedFrameLength = 255;
+  p.onAirBytes = 255;
+  p.wakeupLeadRxNs = 1000000LL; // short RX-slot lead: the frame is still on air at the 2.5 ms wakeup
+  return p;
+}
+
+void test_net_long_255b_frames_with_short_rx_lead_hold_sync() {
+  static AirProfile p = long255Profile();
+  v2TrialHoldsSync(p, 253, "255 B fixture");
+}
+
+void test_net_long_255b_frames_with_single_lead_cut_own_frames() {
+  // Negative control: the 255 B / 17.77 ms frames with the usual 2.5 ms lead before RX slots. The wakeup at 17.5 ms hops
+  // and arms RX while the own frame is still on air; the simulation models that as a lost frame.
+  static AirProfile oneLead = long255Profile();
   oneLead.wakeupLeadRxNs = 0;
   NetPair n(200, false, oneLead, netSlotTiming(oneLead).toaNs);
   n.runFor(10000000000LL);
   TEST_ASSERT_TRUE(n.rTx->txTruncated > 50);
+}
+
+void test_net_v2_trial_single_lead_clean_at_220b() {
+  // The shipped 220 B profile uses the single 2.5 ms lead (wakeupLeadRxNs = 0): the own frame ends 2.09 ms before the
+  // wakeup, so nothing is cut.
+  TEST_ASSERT_EQUAL_INT64(0, kNetworkProfileV2Trial.wakeupLeadRxNs);
+  NetPair n(200, false, kNetworkProfileV2Trial, netSlotTiming(kNetworkProfileV2Trial).toaNs);
+  n.runFor(10000000000LL);
+  TEST_ASSERT_EQUAL_UINT32(0, n.rTx->txTruncated);
+}
+
+// Build-flag experiment (-DEXVECTRLINK_NET_WAKEUP_LEAD_NS=3500000), emulated through a profile copy: v1 with a 3.5 ms
+// wakeup lead (before both TX and RX slots) locks, holds sync and never cuts an own frame.
+void test_net_v1_with_3p5ms_wakeup_lead_holds_sync() {
+  static AirProfile lead35 = kNetworkProfileV1;
+  lead35.wakeupLeadNs = 3500000LL;
+  const auto t = netSlotTiming(lead35);
+  TEST_ASSERT_TRUE(t.fitsStrict);
+  v2TrialHoldsSync(lead35, 253, "v1 lead 3.5 ms");
 }
 
 void test_fpv_and_network_never_accept_each_other() {
@@ -496,6 +536,108 @@ void test_fpv_and_network_never_accept_each_other() {
   TEST_ASSERT_EQUAL_INT((int)FHSSState::Searching, (int)n.rx->getFhssState());
 }
 
+// ------------------------------------------------------------------------------------------------ AIRDIAG counters
+// SlotDiag counts must agree with what the fake radios really did, and must not change behaviour (the FPV golden
+// above covers that: it runs the same FHSS code with the counters compiled in).
+static void checkDiagAgainstRadios(NetPair &n) {
+  const SlotDiag &t = n.tx->getSlotDiag();
+  const SlotDiag &r = n.rx->getSlotDiag();
+  // TX started == transmissions that really left the fake radio.
+  TEST_ASSERT_EQUAL_UINT32(n.rTx->txLog.size(), t.txStarted);
+  TEST_ASSERT_EQUAL_UINT32(n.rRx->txLog.size(), r.txStarted);
+  // Every own TX slot is either started, skipped (not synced / setup) or lost in a catch-up; the latest may be pending.
+  TEST_ASSERT_UINT32_WITHIN(1, t.txSlots, t.txStarted + t.txSkipNotSynced + t.txSkipSetup + t.txMissed);
+  TEST_ASSERT_UINT32_WITHIN(1, r.txSlots, r.txStarted + r.txSkipNotSynced + r.txSkipSetup + r.txMissed);
+  // RX slots split exactly into valid and none.
+  TEST_ASSERT_EQUAL_UINT32(t.rxSlots, t.rxValid + t.rxNone);
+  TEST_ASSERT_EQUAL_UINT32(r.rxSlots, r.rxValid + r.rxNone);
+  // Valid slots == frames delivered to the handler (every network frame carries a payload).
+  TEST_ASSERT_UINT32_WITHIN(1, n.rxGot[0], t.rxValid); // the newest one is counted at its slot end
+  TEST_ASSERT_UINT32_WITHIN(1, n.rxGot[1], r.rxValid);
+  TEST_ASSERT_TRUE(t.wakeups > 100 && r.wakeups > 100);
+}
+
+static void diagCleanRun(const AirProfile &prof, int64_t toaNs) {
+  NetPair n(0, false, prof, toaNs);
+  n.runFor(10000000000LL);
+  TEST_ASSERT_EQUAL_INT((int)FHSSState::Synced, (int)n.rx->getFhssState());
+  checkDiagAgainstRadios(n);
+  const SlotDiag &t = n.tx->getSlotDiag();
+  const SlotDiag &r = n.rx->getSlotDiag();
+  char msg[200];
+  snprintf(msg, sizeof msg, "tx: slots %u started %u rx %u/%u radio %u | rx side: slots %u started %u nsy %u rx %u/%u",
+           (unsigned)t.txSlots, (unsigned)t.txStarted, (unsigned)t.rxValid, (unsigned)t.rxSlots,
+           (unsigned)t.rxRadioPkts, (unsigned)r.txSlots, (unsigned)r.txStarted, (unsigned)r.txSkipNotSynced,
+           (unsigned)r.rxValid, (unsigned)r.rxSlots);
+  TEST_MESSAGE(msg);
+  snprintf(msg, sizeof msg, "wakeups tx %u rx %u, wl1 tx %u rx %u, wakeLateMax tx %lld rx %lld us, prepMax %lld us",
+           (unsigned)t.wakeups, (unsigned)r.wakeups, (unsigned)t.wakeLate1ms, (unsigned)r.wakeLate1ms,
+           (long long)(t.wakeLateMaxNs / 1000), (long long)(r.wakeLateMaxNs / 1000), (long long)(t.prepMaxNs / 1000));
+  TEST_MESSAGE(msg);
+  // The RX side skipped its first TX slots while Searching/Syncing, the TX side (always synced) never.
+  TEST_ASSERT_TRUE(r.txSkipNotSynced > 0);
+  TEST_ASSERT_EQUAL_UINT32(0, t.txSkipNotSynced);
+  TEST_ASSERT_EQUAL_UINT32(0, t.txSkipSetup);
+  // The harness runs both ends on one thread, so one end's busy-wait delays the other's wakeup (up to ~2.5 ms): the
+  // lateness counters are only checked for consistency here, and exactly in the stall test below.
+  TEST_ASSERT_TRUE(t.wakeLate1ms <= t.wakeups && t.wakeLateMaxNs >= 0);
+  // Nothing fast-forwards in a clean run.
+  TEST_ASSERT_EQUAL_UINT32(0, t.missEvents);
+  TEST_ASSERT_EQUAL_UINT32(0, t.txMissed);
+  TEST_ASSERT_EQUAL_UINT32(0, t.txLateStart);
+  // Radio packets seen == frames passing the trailer check (nothing bad on this fake air).
+  TEST_ASSERT_EQUAL_UINT32(0, t.rxTrailerBad);
+  TEST_ASSERT_EQUAL_UINT32(0, r.rxTrailerBad);
+  // Prep time is wakeup -> prep done: positive and inside the wakeup lead.
+  TEST_ASSERT_TRUE(t.prepMaxNs >= 0 && t.prepMaxNs < prof.wakeupLeadNs);
+  TEST_ASSERT_TRUE(t.prepSumNs / (int64_t)t.txStarted <= t.prepMaxNs);
+  // Window reset zeroes only the maxima.
+  n.tx->resetSlotDiagWindow();
+  TEST_ASSERT_EQUAL_INT64(0, n.tx->getSlotDiag().prepMaxNs);
+  TEST_ASSERT_EQUAL_UINT32(t.txStarted, n.tx->getSlotDiag().txStarted);
+}
+
+void test_diag_counters_v1() { diagCleanRun(kNetworkProfileV1, 10560000LL); }
+void test_diag_counters_v2_trial() { diagCleanRun(kNetworkProfileV2Trial, netSlotTiming(kNetworkProfileV2Trial).toaNs); }
+
+void test_diag_late_wakeup_and_rf_block() {
+  NetPair n;
+  n.runFor(8000000000LL);
+  TEST_ASSERT_EQUAL_INT((int)FHSSState::Synced, (int)n.rx->getFhssState());
+  n.tx->resetSlotDiagWindow();
+  const SlotDiag before = n.tx->getSlotDiag();
+  // A 12 ms scheduler stall on both ends: the next wakeup is ~12 ms late (far above the ~2.5 ms harness baseline).
+  advance(12000000LL);
+  n.runFor(1000000000LL);
+  const SlotDiag &t = n.tx->getSlotDiag();
+  TEST_ASSERT_TRUE(t.wakeLate1ms > before.wakeLate1ms);
+  TEST_ASSERT_TRUE(t.wakeLateMaxNs >= 9000000LL);
+  // RF blocked for 1 s: the TX side keeps transmitting, receives nothing valid.
+  n.air.blockStart = g_now;
+  n.air.blockEnd = g_now + 1000000000LL;
+  const SlotDiag mid = n.tx->getSlotDiag();
+  n.runFor(1000000000LL);
+  const SlotDiag &after = n.tx->getSlotDiag();
+  TEST_ASSERT_TRUE(after.txStarted - mid.txStarted >= 24);
+  TEST_ASSERT_TRUE(after.rxValid - mid.rxValid <= 1); // one frame in flight at the block start
+  TEST_ASSERT_TRUE(after.rxNone - mid.rxNone >= 20);
+}
+
+// The silent-skip hypothesis: startTx() issued but the radio never transmits. txStarted rises, the radio's TX-done
+// count (here: the fake's txLog) does not.
+void test_diag_shows_silent_startTx() {
+  NetPair n;
+  n.runFor(8000000000LL);
+  TEST_ASSERT_EQUAL_INT((int)FHSSState::Synced, (int)n.rx->getFhssState());
+  const uint32_t started0 = n.rx->getSlotDiag().txStarted, done0 = (uint32_t)n.rRx->txLog.size();
+  n.rRx->silentStartTx = true;
+  n.runFor(2000000000LL);
+  const uint32_t started = n.rx->getSlotDiag().txStarted - started0;
+  const uint32_t done = (uint32_t)n.rRx->txLog.size() - done0;
+  TEST_ASSERT_TRUE(started >= 45);
+  TEST_ASSERT_EQUAL_UINT32(0, done);
+}
+
 void setUp() {}
 void tearDown() {}
 
@@ -507,8 +649,15 @@ int main(int, char **) {
   RUN_TEST(test_net_one_to_one_rates_when_synced);
   RUN_TEST(test_net_holds_sync_with_crystal_mismatch);
   RUN_TEST(test_net_recovers_after_5s_rf_block);
-  RUN_TEST(test_net_v2_trial_locks_and_holds_with_17_8ms_frames);
-  RUN_TEST(test_net_v2_trial_with_single_lead_cuts_own_frames);
+  RUN_TEST(test_net_v2_trial_locks_and_holds_with_220b_frames);
+  RUN_TEST(test_net_long_255b_frames_with_short_rx_lead_hold_sync);
+  RUN_TEST(test_net_long_255b_frames_with_single_lead_cut_own_frames);
+  RUN_TEST(test_net_v2_trial_single_lead_clean_at_220b);
+  RUN_TEST(test_net_v1_with_3p5ms_wakeup_lead_holds_sync);
   RUN_TEST(test_fpv_and_network_never_accept_each_other);
+  RUN_TEST(test_diag_counters_v1);
+  RUN_TEST(test_diag_counters_v2_trial);
+  RUN_TEST(test_diag_late_wakeup_and_rf_block);
+  RUN_TEST(test_diag_shows_silent_startTx);
   return UNITY_END();
 }
