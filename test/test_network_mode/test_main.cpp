@@ -787,6 +787,25 @@ void test_log_text_goes_to_usb_not_air() {
   TEST_ASSERT_EQUAL_INT(0, a.count(0x02));
 }
 
+void test_log_text_cap_fits_active_profile_air_frame() {
+  // 220 B on air (v2): 2 trailer + 3 header + 4 CRC + 1 entry length = 10 -> 210 B net frame -> 203 B of text.
+  static_assert(kMaxNetFrameActive <= net::kMaxNetFrame, "net frame cap");
+  if (&VCTR::ExVectrLink::datalink::kNetworkProfileActive == &VCTR::ExVectrLink::datalink::kNetworkProfileV2) {
+    TEST_ASSERT_EQUAL_UINT32(210, kMaxNetFrameActive);
+    TEST_ASSERT_EQUAL_UINT32(203, kMaxLogTextActive);
+  }
+  Rig r;
+  char text[240];
+  memset(text, 'x', sizeof text);
+  text[sizeof text - 1] = 0;
+  TEST_ASSERT_TRUE(r.router.log(Packets::Severity::kInfo, text));
+  const auto &u = r.usb.sent.back();
+  Packets::LogText lt;
+  TEST_ASSERT_TRUE(lt.decode(u.d + 6, u.len - 6));
+  TEST_ASSERT_EQUAL_UINT32(kMaxLogTextActive, lt.text_len); // truncated, not dropped
+  TEST_ASSERT_TRUE(u.len <= kMaxNetFrameActive);            // the whole frame fits one air frame
+}
+
 void test_no_heap_use_after_construction() {
   Rig r;
   r.usb.sent.reserve(4096); // the recorder is the test's own heap use
@@ -1182,6 +1201,7 @@ int main() {
   RUN_TEST(test_router_battery_skipped_when_unknown);
   RUN_TEST(test_router_stale_vehicle_telemetry_not_shown);
   RUN_TEST(test_log_text_goes_to_usb_not_air);
+  RUN_TEST(test_log_text_cap_fits_active_profile_air_frame);
   RUN_TEST(test_no_heap_use_after_construction);
   RUN_TEST(test_filter_only_gs_heartbeat_and_rc_state_dropped_on_air);
   RUN_TEST(test_cmd_state_forwarding_matrix_router);
