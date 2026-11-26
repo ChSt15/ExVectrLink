@@ -83,6 +83,9 @@ class NetAirAccess : public network::AirAccessI,
 public:
   using Link = network::AirFrameLink<16, 8>;
   static constexpr size_t kMaxAir = 255;
+  static_assert(ExVectrLink::datalink::kNetworkProfileV1.fixedFrameLength <= kMaxAir &&
+                    ExVectrLink::datalink::kNetworkProfileV2Trial.fixedFrameLength <= kMaxAir,
+                "air profile frame must fit the air buffer");
   static constexpr size_t kQueueCapacity = 16 + 8;
 
   struct Counters {

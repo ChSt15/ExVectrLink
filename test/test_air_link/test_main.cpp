@@ -198,6 +198,75 @@ void test_slot_budget() {
   TEST_ASSERT_TRUE(dl::kNetworkProfileV1.wakeupLeadNs < dl::kNetworkProfileV1.slotIntervalNs / 4);
 }
 
+void test_v2_trial_profile_timing() {
+  const auto &v1 = dl::kNetworkProfileV1;
+  const auto &v2 = dl::kNetworkProfileV2Trial;
+  // the trial differs from v1 in the spreading factor only
+  TEST_ASSERT_EQUAL_UINT8(6, v2.lora.sf);
+  TEST_ASSERT_EQUAL_UINT32(v1.lora.bwHz, v2.lora.bwHz);
+  TEST_ASSERT_EQUAL_UINT8(v1.lora.cr, v2.lora.cr);
+  TEST_ASSERT_EQUAL_UINT8(v1.lora.preamble, v2.lora.preamble);
+  TEST_ASSERT_EQUAL_UINT8(255, v2.fixedFrameLength);
+  TEST_ASSERT_EQUAL_UINT8(v2.fixedFrameLength, v2.onAirBytes);
+  TEST_ASSERT_EQUAL_INT64(v1.slotIntervalNs, v2.slotIntervalNs);
+  TEST_ASSERT_EQUAL_INT64(v1.wakeupLeadNs, v2.wakeupLeadNs);
+  TEST_ASSERT_EQUAL_UINT8(v1.hopKey, v2.hopKey);
+  TEST_ASSERT_EQUAL_UINT8(v1.linkVersion, v2.linkVersion);
+  TEST_ASSERT_EQUAL_UINT8(v1.slotsPerHop, v2.slotsPerHop);
+  TEST_ASSERT_EQUAL_UINT8(v1.rolePeriod, v2.rolePeriod);
+
+  // v1: fits the strict budget, no grace rescue needed
+  const auto t1 = dl::netSlotTiming(v1);
+  TEST_ASSERT_INT64_WITHIN(5000, 10560000, t1.toaNs);
+  TEST_ASSERT_TRUE(t1.fitsStrict);
+  TEST_ASSERT_TRUE(t1.fitsWithGrace);
+  TEST_ASSERT_TRUE(t1.wakeupSlackNs > 0);
+
+  // v2-trial: 17.77 ms. Fails the strict 16.5 ms budget by 1.27 ms, frame still in flight at the wakeup (-0.27 ms),
+  // but ends 1.73 ms before the hard grace cutoff and keeps 0.73 ms of the 1 ms margin -> fits with grace.
+  const auto t2 = dl::netSlotTiming(v2);
+  TEST_ASSERT_INT64_WITHIN(5000, 17772000, t2.toaNs);
+  TEST_ASSERT_FALSE(t2.fitsStrict);
+  TEST_ASSERT_INT64_WITHIN(5000, -1272000, t2.strictMarginNs);
+  TEST_ASSERT_INT64_WITHIN(5000, -272000, t2.wakeupSlackNs);
+  TEST_ASSERT_INT64_WITHIN(5000, 1728000, t2.graceMarginNs);
+  TEST_ASSERT_INT64_WITHIN(5000, 728000, t2.graceBudgetMarginNs);
+  TEST_ASSERT_INT64_WITHIN(5000, 2228000, t2.txPrepLeftNs);
+  // the own 17.77 ms TX has ended 1.23 ms before the wakeup of the following RX slot (lead 1.0 ms)
+  TEST_ASSERT_INT64_WITHIN(5000, 1228000, t2.ownTxDoneSlackNs);
+  TEST_ASSERT_EQUAL_INT64(1000000, dl::wakeupLeadForRx(v2));
+  TEST_ASSERT_EQUAL_INT64(v1.wakeupLeadNs, dl::wakeupLeadForRx(v1)); // v1: one lead for both roles
+  TEST_ASSERT_TRUE(t2.fitsWithGrace);
+  // the legacy guard check (3.5 ms) refuses it, as the design doc says
+  TEST_ASSERT_FALSE(fm::slotFits(v2.lora, v2.onAirBytes, v2.slotIntervalNs, 3500000));
+
+  // same frame with the usual 2.5 ms lead before the RX slot: the wakeup would cut the own TX -> refused
+  dl::AirProfile oneLead = v2;
+  oneLead.wakeupLeadRxNs = 0;
+  TEST_ASSERT_TRUE(dl::netSlotTiming(oneLead).ownTxDoneSlackNs < 0);
+  TEST_ASSERT_FALSE(dl::netSlotTiming(oneLead).fitsWithGrace);
+
+  // SF7 (30.7 ms) and a 10 ms slot must be refused by the same check
+  dl::AirProfile sf7 = v2;
+  sf7.lora.sf = 7;
+  TEST_ASSERT_FALSE(dl::netSlotTiming(sf7).fitsWithGrace);
+  dl::AirProfile shortSlot = v1;
+  shortSlot.slotIntervalNs = 10000000;
+  TEST_ASSERT_FALSE(dl::netSlotTiming(shortSlot).fitsWithGrace);
+}
+
+void test_active_profile_selection_and_frame_limits() {
+#if defined(EXVECTRLINK_NET_PROFILE_V2_TRIAL)
+  TEST_ASSERT_TRUE(&dl::kNetworkProfileActive == &dl::kNetworkProfileV2Trial);
+#else
+  TEST_ASSERT_TRUE(&dl::kNetworkProfileActive == &dl::kNetworkProfileV1); // v1 is the default
+#endif
+  TEST_ASSERT_TRUE(dl::netSlotTiming(dl::kNetworkProfileActive).fitsWithGrace);
+  TEST_ASSERT_TRUE(dl::kNetworkProfileActive.fixedFrameLength <= NetAirAccess::kMaxAir);
+  // 255 B on air = 253 B air packet + 2 B trailer, in every profile
+  TEST_ASSERT_EQUAL_UINT32(253, dl::kNetworkProfileV2Trial.fixedFrameLength - 2);
+}
+
 void test_expected_rates() {
   const auto &n = dl::kNetworkProfileV1;
   TEST_ASSERT_EQUAL_UINT32(25, fm::expectedRxPacketsPerSecond(false, n.rolePeriod, n.slotIntervalNs));
@@ -1437,6 +1506,8 @@ int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_time_on_air_profile_v1);
   RUN_TEST(test_slot_budget);
+  RUN_TEST(test_v2_trial_profile_timing);
+  RUN_TEST(test_active_profile_selection_and_frame_limits);
   RUN_TEST(test_expected_rates);
   RUN_TEST(test_slot_roles_one_to_one);
   RUN_TEST(test_trailer_counters_and_seeds);

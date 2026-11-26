@@ -12,6 +12,7 @@ These docs are versioned with the code. **Keep them current:** a change isn't fi
 | [air-protocol.md](air-protocol.md) | FHSS slots/hops/sync, radio settings and presets, OTA frame and trailer, packet types, RC packets, data, link telemetry, diversity, dynamic power, bind, WiFi upload mode, sync failsafe |
 | [serial-protocol.md](serial-protocol.md) | Note: the host ↔ module serial protocol (`SerialTelecoms`) was removed, and why |
 | [network-mode.md](network-mode.md) | **ExVectrNetwork mode** firmwares: TX module (node 2) and vehicle receiver (node 3) routers, FHSS air link with air profile v1, sync, diversity, power, filters, WiFi upload, host tests, bench plan |
+| [air-link-optimisation.md](air-link-optimisation.md) | **Design, plus the implemented build-time "v2-trial" profile (section 8):** network-mode LoRa SF/BW/CR options vs the 20 ms slot, runtime air profile switch with fallback (not implemented), recommended v2, field test |
 | [crsf.md](crsf.md) | CRSF input from the handset, Lua parameter menu, telemetry relay, CRSF/SBUS output to flight controllers |
 | [settings.md](settings.md) | What is persisted in EEPROM, and how to add a setting |
 | [known-issues.md](known-issues.md) | Problems found while documenting (not fixed) |

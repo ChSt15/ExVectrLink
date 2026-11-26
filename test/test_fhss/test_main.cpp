@@ -80,12 +80,14 @@ public:
   size_t getNumChannels() const override { return 20; }
   size_t getCurrentChannel() const override { return channel_; }
   void setChannel(size_t c) override {
+    if (c != channel_) truncateIfTx();
     if (c != channel_) abortRx();
     channel_ = c;
   }
 
   bool configureRadio() override { return true; }
   void startRx(int64_t) override {
+    if (mode_ == Mode::Tx) truncateIfTx();
     if (mode_ != Mode::Rx) {
       mode_ = Mode::Rx;
       rxArmedAt_ = g_now;
@@ -178,9 +180,21 @@ public:
 
   Transmission lastTx;
   std::vector<Transmission> txLog;
+  uint32_t txTruncated = 0; ///< own transmissions cut short by a channel change or RX arm while still on air
 
 private:
   enum class Mode { Idle, Rx, Tx };
+  /// The real radio aborts a running TX on setRx / channel change: the receiver then sees a broken frame (lost).
+  void truncateIfTx() {
+    if (mode_ != Mode::Tx || g_now >= txEnd_) return;
+    for (auto it = air_.inFlight.begin(); it != air_.inFlight.end(); ++it) {
+      if (it->src == id_ && it->start == lastTx.start) {
+        air_.inFlight.erase(it);
+        break;
+      }
+    }
+    txTruncated++;
+  }
   void abortRx() {
     lastChannelChange_ = g_now;
     rxArmedAt_ = g_now;
@@ -308,18 +322,19 @@ struct NetPair {
   int64_t lastRxAtRx = 0;
   int64_t firstSyncedNs = 0;
 
-  explicit NetPair(int64_t txIntervalExtraNs = 0, bool fpvTx = false) {
+  explicit NetPair(int64_t txIntervalExtraNs = 0, bool fpvTx = false,
+                   const AirProfile &prof = kNetworkProfileV1, int64_t toaNs = 10560000LL) {
     g_now = 1000000000LL;
-    rTx = new FakeRadio(air, 0, 10560000LL, 900000LL, 150000LL);
-    rRx = new FakeRadio(air, 1, 10560000LL, 900000LL, 150000LL);
+    rTx = new FakeRadio(air, 0, toaNs, 900000LL, 150000LL);
+    rRx = new FakeRadio(air, 1, toaNs, 900000LL, 150000LL);
     tx = new FHSS(*rTx);
     rx = new FHSS(*rRx);
     if (!fpvTx) {
-      tx->applyProfile(kNetworkProfileV1);
-      tx->setSlotInterval(kNetworkProfileV1.slotIntervalNs + txIntervalExtraNs); // crystal mismatch
+      tx->applyProfile(prof);
+      tx->setSlotInterval(prof.slotIntervalNs + txIntervalExtraNs); // crystal mismatch
       tx->setTxPayloadProvider(&pTx);
     }
-    rx->applyProfile(kNetworkProfileV1);
+    rx->applyProfile(prof);
     rx->setTxPayloadProvider(&pRx);
     tx->setIsRxSide(false);
     rx->setIsRxSide(true);
@@ -434,6 +449,38 @@ void test_net_recovers_after_5s_rf_block() {
   TEST_ASSERT_TRUE(n.firstSyncedNs - blockEnd < 6000000000LL);
 }
 
+void test_net_v2_trial_locks_and_holds_with_17_8ms_frames() {
+  const auto timing = netSlotTiming(kNetworkProfileV2Trial);
+  const int64_t toaNs = timing.toaNs; // 17.77 ms, from the repo formula
+  NetPair n(200, false, kNetworkProfileV2Trial, toaNs);
+  n.runFor(10000000000LL);
+  TEST_ASSERT_EQUAL_INT((int)FHSSState::Synced, (int)n.rx->getFhssState());
+  TEST_ASSERT_EQUAL_UINT32(253, n.pTx.lastMaxLen);
+  const uint32_t desync0 = n.rx->getDesyncCounter(), g1 = n.rxGot[1], g0 = n.rxGot[0];
+  n.runFor(20000000000LL); // 20 s
+  TEST_ASSERT_EQUAL_INT((int)FHSSState::Synced, (int)n.rx->getFhssState());
+  TEST_ASSERT_EQUAL_UINT32(desync0, n.rx->getDesyncCounter());
+  char msg[120];
+  snprintf(msg, sizeof msg, "v2-trial 20 s: uplink %u, downlink %u of 500 each", (unsigned)(n.rxGot[1] - g1),
+           (unsigned)(n.rxGot[0] - g0));
+  TEST_MESSAGE(msg);
+  TEST_ASSERT_TRUE(n.rxGot[1] - g1 >= 490);
+  TEST_ASSERT_TRUE(n.rxGot[0] - g0 >= 490);
+  TEST_ASSERT_INT64_WITHIN(1000, 40000000LL, n.pTx.minGap);
+  TEST_ASSERT_EQUAL_UINT32(0, n.rTx->txTruncated); // the RX-slot wakeup never cuts an own frame
+  TEST_ASSERT_EQUAL_UINT32(0, n.rRx->txTruncated);
+}
+
+void test_net_v2_trial_with_single_lead_cuts_own_frames() {
+  // Negative control: the same 17.77 ms frames with the usual 2.5 ms lead before RX slots. The wakeup at 17.5 ms hops
+  // and arms RX while the own frame is still on air; the simulation now models that as a lost frame.
+  static AirProfile oneLead = kNetworkProfileV2Trial;
+  oneLead.wakeupLeadRxNs = 0;
+  NetPair n(200, false, oneLead, netSlotTiming(oneLead).toaNs);
+  n.runFor(10000000000LL);
+  TEST_ASSERT_TRUE(n.rTx->txTruncated > 50);
+}
+
 void test_fpv_and_network_never_accept_each_other() {
   NetPair n(0, /*fpvTx=*/true); // FPV-default TX against a network-profile RX
   network::DataPacket p;
@@ -460,6 +507,8 @@ int main(int, char **) {
   RUN_TEST(test_net_one_to_one_rates_when_synced);
   RUN_TEST(test_net_holds_sync_with_crystal_mismatch);
   RUN_TEST(test_net_recovers_after_5s_rf_block);
+  RUN_TEST(test_net_v2_trial_locks_and_holds_with_17_8ms_frames);
+  RUN_TEST(test_net_v2_trial_with_single_lead_cuts_own_frames);
   RUN_TEST(test_fpv_and_network_never_accept_each_other);
   return UNITY_END();
 }

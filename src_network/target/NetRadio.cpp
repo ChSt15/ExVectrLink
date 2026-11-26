@@ -17,6 +17,7 @@
 
 namespace VCTR::ExVectrLink::netmode {
 
+using datalink::AirProfile;
 using datalink::kNetworkProfileV1;
 namespace sx = VCTR::network::datalink;
 
@@ -59,13 +60,28 @@ int64_t drainDio1TimestampB() { return drainDio1Timestamp(dio1FiredB, dio1Micros
 
 NetAirAccess *gAccess = nullptr;
 
+// The air profile in use: chosen at build time (kNetworkProfileActive, v1 unless -DEXVECTRLINK_NET_PROFILE_V2_TRIAL).
+// A profile that does not fit its slot (netSlotTiming) is a build mistake; fall back to v1 instead of running it.
+const AirProfile &activeProfile() {
+  return datalink::netSlotTiming(datalink::kNetworkProfileActive).fitsWithGrace ? datalink::kNetworkProfileActive
+                                                                               : kNetworkProfileV1;
+}
+
+sx::SX1280_SF sfOf(const AirProfile &p) {
+  switch (p.lora.sf) {
+  case 6: return sx::SF_6;
+  case 7: return sx::SF_7;
+  default: return sx::SF_5;
+  }
+}
+
 void configureRadio(sx::Sx1280_Direct &radio, int maxPower, int paDbm, int8_t power) {
-  const auto &p = kNetworkProfileV1;
+  const auto &p = activeProfile();
   radio.setMaxFrameLength(p.fixedFrameLength); // 255: shared FIFO base 0 (before configureRadio)
-  radio.setSpreadingFactor(sx::SF_5);
+  radio.setSpreadingFactor(sfOf(p));           // BW1600 and CR 4/5 are the same in every network profile so far
   radio.setBandwidth(sx::BW_1600KHz);
   radio.setCodingRate(sx::CR_4_5);
-  radio.setPacketMode(sx::SX1280_PacketMode::Fixed); // implicit header, exactly 255 bytes, no length prefix
+  radio.setPacketMode(sx::SX1280_PacketMode::Fixed); // implicit header, exactly fixedFrameLength bytes, no length prefix
   radio.setFixedPacketLength(p.fixedFrameLength);
   radio.setChannel(0);
   radio.setTxMaxPower(maxPower); // board maximum = the runtime ceiling; the power in use is set separately
@@ -80,7 +96,7 @@ datalink::Sx1280Diversity &netDiversity() { return datalink::getSx1280Diversity(
 
 uint16_t netExpectedRxPerSecond(bool isRxSide) {
   return static_cast<uint16_t>(datalink::fhss::expectedRxPacketsPerSecond(
-      isRxSide, kNetworkProfileV1.rolePeriod, kNetworkProfileV1.slotIntervalNs));
+      isRxSide, activeProfile().rolePeriod, activeProfile().slotIntervalNs));
 }
 
 void netRadioSetup(bool isRxSide, NetAirAccess &access, int8_t txPowerDbm) {
@@ -95,7 +111,7 @@ void netRadioSetup(bool isRxSide, NetAirAccess &access, int8_t txPowerDbm) {
 
   auto &fhss = datalink::getFhss();
   fhss.setIsRxSide(isRxSide);
-  fhss.applyProfile(kNetworkProfileV1);
+  fhss.applyProfile(activeProfile());
   fhss.setTxPayloadProvider(&access);
 
   radio::initRadioDrivers();

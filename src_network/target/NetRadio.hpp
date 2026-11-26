@@ -2,7 +2,8 @@
 // Radio glue shared by the network-mode firmwares (TX module node 2, RX module node 3). Arduino-dependent.
 //
 // Brings up the SX1280(s) through the same src/ objects as the FPV firmware (SX1280.cpp, DatalinkSetup.cpp,
-// DiversitySetup.cpp, FhssSetup.cpp), configures air profile v1 (kNetworkProfileV1: LoRa SF5/BW1600/CR4/5, 12-symbol
+// DiversitySetup.cpp, FhssSetup.cpp), configures the air profile (build-time choice: v1 by default, or the v2-trial with
+// -DEXVECTRLINK_NET_PROFILE_V2_TRIAL, docs/air-link-optimisation.md section 8; v1 = LoRa SF5/BW1600/CR4/5, 12-symbol
 // preamble, CRC on, implicit header, fixed 255 bytes; FHSS 20 ms slots, 1:1 roles, 2 slots per hop, own link
 // version and hop key) and connects FHSS to the NetAirAccess (pull hook for TX slots, receive handler into the
 // mailbox). DIO1 ISRs only record a timestamp, exactly as in src/main.cpp.
