@@ -23,6 +23,17 @@
 
 namespace VCTR::ExVectrLink::netmode {
 
+/// Largest network frame (incl. its 4-byte header) that fits one air frame of the ACTIVE profile: on-air bytes minus the
+/// FHSS trailer (2), the air packet header (3), its CRC-32 (4) and the entry length byte (1): 210 B at 220 B on air.
+constexpr size_t kAirFrameOverhead = 2 + 3 + 4 + 1;
+constexpr size_t kMaxNetFrameActive =
+    (ExVectrLink::datalink::kNetworkProfileActive.fixedFrameLength - kAirFrameOverhead) < network::kMaxNetFrame
+        ? (ExVectrLink::datalink::kNetworkProfileActive.fixedFrameLength - kAirFrameOverhead)
+        : network::kMaxNetFrame; // v1 (255 B): capped by the library's 240 B frame limit
+/// Largest LogText text that fits that frame: net header (4), PORT + SEQ (2) and the severity byte (1) come off:
+/// 203 B at 210. RxRouter::log / NetworkRouter::log truncate to it (a longer frame would be dropped by the aggregator).
+constexpr size_t kMaxLogTextActive = kMaxNetFrameActive - 4 - 2 - 1;
+
 /// Where a router reads the module's own radio measurements (its LINK_STATS and the CRSF downlink fields).
 class AirStatsSourceI {
 public:
@@ -83,6 +94,8 @@ class NetAirAccess : public network::AirAccessI,
 public:
   using Link = network::AirFrameLink<16, 8>;
   static constexpr size_t kMaxAir = 255;
+  static_assert(ExVectrLink::datalink::kNetworkProfileActive.fixedFrameLength <= kMaxAir,
+                "air profile frame must fit the air buffer");
   static constexpr size_t kQueueCapacity = 16 + 8;
 
   struct Counters {

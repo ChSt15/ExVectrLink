@@ -135,6 +135,7 @@ bool NetworkRouter::log(Packets::Severity severity, const char *text) {
   lt.severity = severity;
   size_t n = text ? strlen(text) : 0;
   if (n > sizeof lt.text) n = sizeof lt.text;
+  if (n > kMaxLogTextActive) n = kMaxLogTextActive; // longer frames never fit one air frame
   memcpy(lt.text, text, n);
   lt.text_len = static_cast<uint16_t>(n);
   uint8_t buf[Packets::LogText::kMaxSize];

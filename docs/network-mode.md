@@ -51,6 +51,10 @@ The "pure" files have no Arduino or ExVectrCore dependency and no heap use after
 
 ## Air link
 
+### Air profile v2 (default) and v1 (rollback)
+
+The network firmwares run **v2** (`kNetworkProfileV2`, `kNetworkProfileActive`): LoRa **SF6**, BW1600, CR 4/5, **220 bytes on air**, **15.409 ms** on air, 20 ms slots (strict margin about 1.09 ms after the 1 ms slot margin), 2.5 ms wakeup lead, hop key 0x37, link version **0x12**. Short note, bench results and rollback: [air-link-v2.md](air-link-v2.md). v1 (below) stays as `kNetworkProfileV1` and is built with `-DEXVECTRLINK_NET_PROFILE_V1`. A v1 and a v2 end never accept each other (different length and trailer seed 0x48/0x88 against 0x49/0x89). The v1 table and frame layout below use 255 bytes; for v2 read 220 bytes on air, an air packet of 218 bytes, a net frame of at most 210 bytes and `LOG_TEXT` of at most 203 bytes (the routers truncate it, `kMaxLogTextActive`).
+
 ### Air profile v1
 
 `kNetworkProfileV1` in `lib/ExVectrLink/include/ExVectrLink/datalink/AirProfile.hpp` (the FPV values are `kFpvProfile`, which are also the FHSS defaults):

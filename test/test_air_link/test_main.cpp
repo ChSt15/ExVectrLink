@@ -188,6 +188,44 @@ void test_time_on_air_profile_v1() {
   TEST_ASSERT_FLOAT_WITHIN(100.0f, 25400.0f, fm::loraTimeOnAirUs(d, 255));
 }
 
+void test_profile_v2() {
+  const auto &v2 = dl::kNetworkProfileV2;
+  const auto &v1 = dl::kNetworkProfileV1;
+  TEST_ASSERT_EQUAL_UINT8(6, v2.lora.sf);
+  TEST_ASSERT_EQUAL_INT32(1625000, v2.lora.bwHz);
+  TEST_ASSERT_EQUAL_UINT8(1, v2.lora.cr);
+  TEST_ASSERT_EQUAL_UINT8(220, v2.fixedFrameLength);
+  TEST_ASSERT_EQUAL_UINT8(220, v2.onAirBytes);
+  TEST_ASSERT_EQUAL_INT64(20000000, v2.slotIntervalNs);
+  TEST_ASSERT_EQUAL_INT64(2500000, v2.wakeupLeadNs);
+  TEST_ASSERT_EQUAL_HEX8(0x37, v2.hopKey); // unchanged
+  // time on air 15.409 ms; strict margin: slot - lead - 1 ms slot margin - toa about 1.09 ms
+  const float us = fm::loraTimeOnAirUs(v2.lora, v2.onAirBytes);
+  TEST_ASSERT_FLOAT_WITHIN(10.0f, 15409.0f, us);
+  const int64_t strict = v2.slotIntervalNs - v2.wakeupLeadNs - 1000000 - (int64_t)(us * 1000.0f);
+  TEST_ASSERT_TRUE(strict > 1000000 && strict < 1200000);
+  TEST_ASSERT_TRUE(fm::slotFits(v2.lora, v2.onAirBytes, v2.slotIntervalNs, v2.wakeupLeadNs + 1000000));
+  // v1 stays unchanged (rollback)
+  TEST_ASSERT_EQUAL_UINT8(5, v1.lora.sf);
+  TEST_ASSERT_EQUAL_UINT8(255, v1.fixedFrameLength);
+  TEST_ASSERT_EQUAL_HEX8(0x11, v1.linkVersion);
+  TEST_ASSERT_EQUAL_HEX8(0x37, v1.hopKey);
+  // v1 and v2 never accept each other: different link version -> different trailer seeds in both directions
+  TEST_ASSERT_EQUAL_HEX8(0x12, v2.linkVersion);
+  for (bool rx : {false, true}) {
+    const uint8_t s1 = fm::trailerSeed(v1.hopKey, v1.linkVersion, rx);
+    const uint8_t s2 = fm::trailerSeed(v2.hopKey, v2.linkVersion, rx);
+    TEST_ASSERT_NOT_EQUAL(s1, s2);
+    TEST_ASSERT_NOT_EQUAL(s1, fm::trailerSeed(v2.hopKey, v2.linkVersion, !rx));
+    TEST_ASSERT_NOT_EQUAL(s2, fm::trailerSeed(dl::kFpvProfile.hopKey, dl::kFpvProfile.linkVersion, rx));
+  }
+#if defined(EXVECTRLINK_NET_PROFILE_V1)
+  TEST_ASSERT_TRUE(&dl::kNetworkProfileActive == &dl::kNetworkProfileV1);
+#else
+  TEST_ASSERT_TRUE(&dl::kNetworkProfileActive == &dl::kNetworkProfileV2);
+#endif
+}
+
 void test_slot_budget() {
   // network: 10.56 ms in 20 ms with 2 ms guard fits; it would not fit a 10 ms slot
   TEST_ASSERT_TRUE(fm::slotFits(dl::kNetworkProfileV1.lora, 255, dl::kNetworkProfileV1.slotIntervalNs, 2000000));
@@ -1436,6 +1474,7 @@ void tearDown() {}
 int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_time_on_air_profile_v1);
+  RUN_TEST(test_profile_v2);
   RUN_TEST(test_slot_budget);
   RUN_TEST(test_expected_rates);
   RUN_TEST(test_slot_roles_one_to_one);
